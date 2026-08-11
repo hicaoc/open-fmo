@@ -1,0 +1,80 @@
+c:\esp\esp-idf>esptool --port COM10 chip-id
+esptool v5.3.1
+Connected to ESP32-S3 on COM10:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 2MB (AP_3v3)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                d0:cf:13:51:0c:4c
+
+Stub flasher running.
+
+Warning: ESP32-S3 has no chip ID. Reading MAC address instead.
+MAC:                d0:cf:13:51:0c:4c
+
+Hard resetting via RTS pin
+
+
+
+D:\work\open-fmo>esptool --port COM10 flash-id
+esptool v5.3.1
+Connected to ESP32-S3 on COM10:
+Chip type:          ESP32-S3 (QFN56) (revision v0.2)
+Features:           Wi-Fi, BT 5 (LE), Dual Core + LP Core, 240MHz, Embedded PSRAM 2MB (AP_3v3)
+Crystal frequency:  40MHz
+USB mode:           USB-Serial/JTAG
+MAC:                d0:cf:13:51:0c:4c
+
+Stub flasher running.
+
+Flash Memory Information:
+=========================
+Manufacturer: ef
+Device: 6018
+Detected flash size: 16MB
+Flash type set in eFuse: quad (4 data lines)
+Flash voltage set by eFuse: 3.3V
+
+Hard resetting via RTS pin......
+
+
+设备身份
+项目	信息
+设备名称	FMO (NFM Over Internet) — 业余无线电互联网语音网关
+开发者	BG5ESN（惜枫醉）
+
+硬件标识	SenHaiX 8800（森海克斯 8800 对讲机）
+射频背板	BK4802 射频芯片 + PY32 单片机，通过 UART AT 指令控制
+ESP32-S3 芯片信息
+型号：ESP32-S3 (QFN56)，revision v0.2
+特性：Wi-Fi + BT5 (LE)，双核 LX7 @ 240MHz
+PSRAM：2MB（嵌入式）
+Flash：16MB，Winbond (ef:6018)，Quad SPI，3.3V
+USB 模式：USB-Serial/JTAG
+已确认使用的外设
+外设	用途
+LCD_CAM	LCD 屏幕驱动（SPI 接口）
+I2S0	数字音频（Codec 连接）
+I2C0	音频 Codec 寄存器配置
+SPI2 / SPI3	LCD 或外部设备
+LEDC (PWM)	LCD 背光亮度控制
+PCNT	旋转编码器（旋钮）脉冲计数
+SARADC	模拟信号采集（可能用于电池电压/按键检测）
+RMT	可能用于 LED 灯带或红外
+UART	与 BK4802 射频模块通信（AT 指令）
+功能模块（从固件字符串提取）
+显示：displayTask、背光控制（Backlight Auto Control）、屏幕翻转（Screen Flip）
+音频：codecTask、audioPlayTask、Opus 编解码（audio/opus）、音量/静音控制
+射频：TX/RX 频率设置、CTCSS 亚音频、发射功率、PTT 检测、静噪（Squelch）
+交互：旋转编码器（短按切换/旋转调节/长按确认）、菜单键
+LED：RX/TX 指示灯（"Red RX, Green TX" 可配置）、LED 亮度
+网络：WiFi STA/AP（SSID: FMO-0C4D）、BLE、APRS-IS、Web 配置器
+存储：SQLite 数据库（QSO 日志、APRS 短消息、事件）
+Flash 分区表
+分区	偏移	大小
+nvs	0x9000	20KB
+otadata	0xE000	8KB
+app0	0x10000	6400KB
+app1	0x650000	6400KB
+spiffs	0xC90000	3456KB
+coredump	0xFF0000	64KB

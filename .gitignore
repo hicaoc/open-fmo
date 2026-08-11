@@ -1,0 +1,47 @@
+# ESP-IDF build artifacts
+firmware/build/
+firmware/build_*/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/dependencies.lock
+
+# Temporary / tool directories
+.probe-idf447-driver/
+.tmp/
+
+ 
+
+# OS / editor
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+open_fmo_full.bin
+tools/build
+tools/dist
+
+# Rust build artifacts
+target/
+
+ 
+ 
+
+# Local logs and private identity files
+*.log
+cert_devicekey.json
+cert_user.json
