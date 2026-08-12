@@ -17,3 +17,4 @@ esp_err_t es8311_codec_write(uint8_t reg, uint8_t value);
 esp_err_t es8311_codec_set_dac_mute(bool muted);
 esp_err_t es8311_codec_set_adc_volume(uint8_t volume);
 esp_err_t es8311_codec_set_dac_volume(uint8_t volume);
+esp_err_t es8311_codec_set_headphone_drive(bool enabled);

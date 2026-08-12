@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define FMO_CONFIG_SCHEMA_VERSION 14
+#define FMO_CONFIG_SCHEMA_VERSION 15
 #define FMO_WIFI_PROFILE_MAX 5
 
 /* ES8311 volume limits: mic (ADC) defaults to 160 and caps at 170;
@@ -92,6 +92,7 @@ typedef struct {
      * the SSID is used by the FMO APRS connection only. */
     char fmo_callsign[16];
     uint8_t fmo_callsign_ssid;
+    bool es8311_hp_drive; /* REG13 HPSW: enable headphone output driver */
 } fmo_config_t;
 
 esp_err_t config_store_init(void);

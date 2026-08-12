@@ -246,3 +246,9 @@ esp_err_t es8311_codec_set_dac_volume(uint8_t volume)
     /* REG32 is an 8-bit volume register: full 0-255 range is valid. */
     return es8311_codec_write(0x32, volume);
 }
+
+esp_err_t es8311_codec_set_headphone_drive(bool enabled)
+{
+    /* REG13 HPSW (bit 4): 0=line output, 1=headphone output driver. */
+    return es8311_codec_write(0x13, enabled ? 0x10 : 0x00);
+}

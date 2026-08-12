@@ -119,6 +119,7 @@ static const char k_index_html_v2[] =
     "<label>&#30005;&#21488;TX&#38899;&#37327; 0-10<input name=tx_volume type=number min=0 max=10></label>"
     "<label>ES8311 &#25196;&#22768;&#22120; 0-255<input name=es8311_dac_vol type=number min=0 max=255></label>"
     "<label>ES8311 &#40614;&#20811;&#39118; 0-170<input name=es8311_adc_vol type=number min=0 max=170></label>"
+    "<label>ES8311 &#32819;&#26426;&#36755;&#20986;&#39537;&#21160; (REG13 HPSW)<input name=es8311_hp_drive type=checkbox value=1></label>"
         "<label>&#36719;&#20214;MIC&#22686;&#30410; 1-5<input name=mic_gain type=number min=1 max=5></label>"
     "<label>&#39057;&#29575;&#20559;&#31227; Hz<input name=freq_tune type=number min=-5000 max=5000 step=10 placeholder=0></label>"
     "<button class=wide>&#21333;&#29420;&#20445;&#23384;</button></fieldset></form>"
@@ -354,7 +355,8 @@ static esp_err_t config_get(httpd_req_t *request)
              "\"tx_mhz\":%.4f,\"rx_ctcss\":%.1f,\"tx_ctcss\":%.1f,"
              "\"squelch\":%u,\"tx_power\":%u,\"rf_enabled\":%s,"
              "\"voice_codec\":%u,\"rx_volume\":%u,\"tx_volume\":%u,"
-                          "\"es8311_dac_vol\":%u,\"es8311_adc_vol\":%u,\"mic_gain\":%u,"
+                          "\"es8311_dac_vol\":%u,\"es8311_adc_vol\":%u,"
+                          "\"es8311_hp_drive\":%s,\"mic_gain\":%u,"
                           "\"freq_tune\":%d,"
              "\"aprs_enabled\":%s,\"aprs_position_set\":%s,\"aprs_ssid\":%u,"
              "\"aprs_latitude\":%.6f,\"aprs_longitude\":%.6f,\"aprs_interval\":%u,"
@@ -372,6 +374,7 @@ static esp_err_t config_get(httpd_req_t *request)
              (unsigned)config.voice_codec,
              (unsigned)config.rx_volume, (unsigned)config.tx_volume,
              (unsigned)config.es8311_dac_vol, (unsigned)config.es8311_adc_vol,
+             config.es8311_hp_drive ? "true" : "false",
                           (unsigned)config.mic_gain,
              (int)config.freq_tune_hz,
              config.aprs_enabled ? "true" : "false",
@@ -581,6 +584,8 @@ static esp_err_t save_post(httpd_req_t *request)
             if (number > FMO_ES8311_ADC_VOL_MAX) error = "es8311_adc_vol range is 0-170";
             else config.es8311_adc_vol = (uint8_t)number;
         }
+        config.es8311_hp_drive =
+            strstr(body, "es8311_hp_drive=1") != NULL;
         if (!error && form_value(body, "mic_gain", value, sizeof(value))) {
             number = strtoul(value, NULL, 10);
             if (number < FMO_MIC_GAIN_MIN || number > FMO_MIC_GAIN_MAX) error = "mic_gain range is 1-5";
@@ -665,6 +670,7 @@ static esp_err_t save_post(httpd_req_t *request)
         (void)radio_at_set_volume(true, config.tx_volume);
         (void)es8311_codec_set_dac_volume(config.es8311_dac_vol);
         (void)es8311_codec_set_adc_volume(config.es8311_adc_vol);
+        (void)es8311_codec_set_headphone_drive(config.es8311_hp_drive);
         audio_passthrough_set_mic_gain(config.mic_gain);
         (void)radio_at_set_freq_tune(config.freq_tune_hz);
     } else if (save_aprs) {

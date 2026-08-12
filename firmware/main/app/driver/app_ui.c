@@ -8,6 +8,7 @@
 #include "audio/audio_passthrough.h"
 #include "audio/nrl_audio_codec.h"
 #include "audio/mdc_signaling.h"
+#include "app/driver/es8311_codec.h"
 #include "app/driver/status_io.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -296,7 +297,7 @@ void app_ui_handle(app_ui_t *ui, encoder_event_type_t event)
             fmo_config_t cfg;
             config_store_load(&cfg);
             if (event == ENCODER_EVENT_PRESS) {
-                ui->audio_adjust_field = (ui->audio_adjust_field + 1) % 6;
+                ui->audio_adjust_field = (ui->audio_adjust_field + 1) % 7;
             } else if (direction != 0) {
                 switch (ui->audio_adjust_field) {
                 case 0: /* default TX network */
@@ -338,6 +339,11 @@ void app_ui_handle(app_ui_t *ui, encoder_event_type_t event)
                     audio_passthrough_set_mic_gain(cfg.mic_gain);
                     break;
                 }
+                case 6: /* ES8311 REG13 HPSW */
+                    cfg.es8311_hp_drive = !cfg.es8311_hp_drive;
+                    (void)es8311_codec_set_headphone_drive(
+                        cfg.es8311_hp_drive);
+                    break;
                 }
                 config_store_save(&cfg);
             }
@@ -1416,7 +1422,7 @@ static void render_audio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
     fmo_config_t cfg = *cfg_get();
     char line[64];
     const uint8_t field = ui->audio_adjust_field;
-    for (uint8_t row = 0; row < 6; ++row) {
+    for (uint8_t row = 0; row < 7; ++row) {
         switch (row) {
         case 0:
             snprintf(line, sizeof(line), "%c TX Network: %s",
@@ -1441,16 +1447,21 @@ static void render_audio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
             snprintf(line, sizeof(line), "%c TX Vol: %u",
                      field == row ? '>' : ' ', (unsigned)cfg.tx_volume);
             break;
-        default:
+        case 5:
             snprintf(line, sizeof(line), "%c MIC Gain: %ux",
                      field == row ? '>' : ' ', (unsigned)cfg.mic_gain);
+            break;
+        default:
+            snprintf(line, sizeof(line), "%c ES8311 HP: %s",
+                     field == row ? '>' : ' ',
+                     cfg.es8311_hp_drive ? "ON" : "OFF");
             break;
         }
         uint16_t color = field == row ? COLOR_ORANGE : COLOR_WHITE;
         if (row == 0 && field != row) {
             color = cfg.tx_network == 1 ? COLOR_ORANGE : COLOR_PURPLE;
         }
-        gfx_text(canvas, 8, 24 + row * 19, line, 2,
+        gfx_text(canvas, 8, 20 + row * 17, line, 2,
                  color, COLOR_BLACK, 410);
     }
 }

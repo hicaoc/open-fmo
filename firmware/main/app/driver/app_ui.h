@@ -38,7 +38,7 @@ typedef struct {
     bool aprs_change_pending;
     uint8_t radio_adjust_field;  /* 0=RX, 1=TX, 2=SQL, 3=PWR */
     uint8_t ctcss_adjust_field;  /* 0=RX, 1=TX */
-    uint8_t audio_adjust_field;  /* 0=codec, 1=rx_vol, 2=tx_vol */
+    uint8_t audio_adjust_field;  /* audio detail selected field (0-6) */
     /* 0=APRS-IS, 1=RF RX, 2=RF TX, 3=NRL RX, 4=NRL TX,
      * 5=RF>IS, 6=IS>RF, 7=NRL>IS, 8=IS>NRL, 9=RF>NRL, 10=NRL>RF */
     uint8_t aprs_adjust_field;

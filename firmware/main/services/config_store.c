@@ -37,6 +37,7 @@ void config_store_defaults(fmo_config_t *config)
     config->aprs_enabled = false;
     config->es8311_dac_vol = FMO_ES8311_DAC_VOL_DEFAULT;  /* speaker default */
     config->es8311_adc_vol = FMO_ES8311_ADC_VOL_DEFAULT;  /* mic default 160 */
+    config->es8311_hp_drive = false;                       /* REG13 HPSW off */
     config->mic_gain = FMO_MIC_GAIN_DEFAULT;              /* software gain 1x */
     config->aprs_position_set = true;
     config->aprs_latitude_e6 = 30251100;   /* 30.2511 */
@@ -175,6 +176,12 @@ esp_err_t config_store_load(fmo_config_t *config)
             ? stored.callsign_ssid : 0;
         migrated = true;
         ESP_LOGI(TAG, "migrated v13 config to v14 (separate FMO identity)");
+    } else if (stored.schema_version == 14 && size <= sizeof(stored)) {
+        memcpy(config, &stored, size);
+        config->schema_version = FMO_CONFIG_SCHEMA_VERSION;
+        config->es8311_hp_drive = false;
+        migrated = true;
+        ESP_LOGI(TAG, "migrated v14 config to v15 (ES8311 headphone drive)");
     } else if (size == sizeof(stored) &&
                stored.schema_version == FMO_CONFIG_SCHEMA_VERSION) {
         *config = stored;

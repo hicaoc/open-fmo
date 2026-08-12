@@ -675,6 +675,7 @@ esp_err_t audio_passthrough_start(void)
         config_store_load(&cfg);
         es8311_codec_set_dac_volume(cfg.es8311_dac_vol);
         es8311_codec_set_adc_volume(cfg.es8311_adc_vol);
+        es8311_codec_set_headphone_drive(cfg.es8311_hp_drive);
     }
 
     /* Step 3: Create output queue mutex */
