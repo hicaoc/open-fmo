@@ -214,7 +214,7 @@ static const char k_servers_html[] =
     "<label>&#21516;&#26102;&#26469;&#35805; <select id=policy><option value=0>&#28151;&#38899;</option><option value=1>&#20808;&#26469;&#20248;&#20808;</option></select></label> "
     "<button onclick=savePolicy()>&#20445;&#23384;</button></section>"
     "<section><h2>NRL</h2><table><thead><tr><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=nrl></tbody></table></section>"
-    "<section><h2>FMO <span class=muted>(&#20027;&#23631;&#21482;&#20999;&#25442;&#25910;&#34255;&#39033;)</span></h2><table><thead><tr><th>&#25910;&#34255;</th><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=fmo></tbody></table></section>"
+    "<section><h2>FMO <span class=muted>(&#20027;&#23631;&#21482;&#20999;&#25442;&#25910;&#34255;&#39033;)</span></h2><label><input id=no_local type=checkbox onchange=savePolicy()> MQTT 5 No Local (&#20851;&#38381;&#21518;&#20801;&#35768;&#26412;&#26426;&#22238;&#29615;&#65292;&#20165;&#29992;&#20110;&#35843;&#35797;)</label><table><thead><tr><th>&#25910;&#34255;</th><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=fmo></tbody></table></section>"
     "<section><h2>FMO &#35777;&#20070;</h2><p class=muted>&#31169;&#38053;&#21482;&#20889;&#20837; Flash&#65292;&#19981;&#25552;&#20379;&#35835;&#22238;&#25509;&#21475;&#12290;</p><pre id=certstatus></pre>"
     "<p>userCert <input id=cu type=file accept=.json,application/json><button onclick=\"uploadCert('user',cu)\">&#19978;&#20256;</button></p>"
     "<p>intermediateCert <input id=ci type=file accept=.json,application/json><button onclick=\"uploadCert('intermediate',ci)\">&#19978;&#20256;</button></p>"
@@ -222,10 +222,10 @@ static const char k_servers_html[] =
     "<script>let data;function esc(s){let d=document.createElement('div');d.textContent=s||'';return d.innerHTML}"
     "async function post(url,obj){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(obj)});if(!r.ok)alert(await r.text());else load()}"
     "function selectServer(kind,key){post('/api/servers/select',{kind,key})}function fav(key,v){post('/api/servers/favorite',{key,favorite:v?1:0})}"
-    "function savePolicy(){post('/api/servers/config',{tx_network:tx.value,audio_policy:policy.value})}"
+    "function savePolicy(){post('/api/servers/config',{tx_network:tx.value,audio_policy:policy.value,no_local:no_local.checked?1:0})}"
     "async function loadCert(){let s=await(await fetch('/api/fmo/cert',{cache:'no-store'})).json();certstatus.textContent=(s.ready?'READY ':'INCOMPLETE ')+(s.callsign||'')+(s.uid?' / '+s.uid:'')+'\\nuser='+s.user+' intermediate='+s.intermediate+' deviceKey='+s.device_key+(s.error?'\\n'+s.error:'')}"
     "async function uploadCert(kind,input){if(!input.files.length)return;let r=await fetch('/api/fmo/cert/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:input.files[0]});if(!r.ok)alert(await r.text());await loadCert()}"
-    "async function load(){data=await(await fetch('/api/servers',{cache:'no-store'})).json();tx.value=data.tx_network;policy.value=data.audio_policy;"
+    "async function load(){data=await(await fetch('/api/servers',{cache:'no-store'})).json();tx.value=data.tx_network;policy.value=data.audio_policy;no_local.checked=!!data.no_local;"
     "function cell(r,t){let c=r.insertCell();c.textContent=t;return c}function button(c,t,fn){let b=document.createElement('button');b.textContent=t;b.onclick=fn;c.appendChild(b)}"
     "nrl.innerHTML='';data.nrl.forEach(x=>{let r=nrl.insertRow();r.className=x.selected?'sel':'';cell(r,x.name);cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);button(r.insertCell(),'\u9009\u62e9',()=>selectServer('nrl',x.key))});"
     "fmo.innerHTML='';data.fmo.forEach(x=>{let r=fmo.insertRow();r.className=x.selected?'sel':'';let c=r.insertCell(),q=document.createElement('input');q.type='checkbox';q.checked=x.favorite;q.onchange=()=>fav(x.key,q.checked);c.appendChild(q);let cs=x.callsign+(x.has_ssid?'-'+x.ssid:'');cell(r,x.name+' / '+cs+(x.uid?' / '+x.uid:''));cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);button(r.insertCell(),'\u9009\u62e9',()=>selectServer('fmo',x.key))})}load();loadCert()</script></body></html>";
@@ -755,8 +755,9 @@ static esp_err_t servers_get(httpd_req_t *request)
     httpd_resp_set_type(request, "application/json");
     char chunk[768];
     snprintf(chunk, sizeof(chunk),
-             "{\"tx_network\":%u,\"audio_policy\":%u,\"nrl\":[",
-             (unsigned)config.tx_network, (unsigned)config.audio_policy);
+             "{\"tx_network\":%u,\"audio_policy\":%u,\"no_local\":%s,\"nrl\":[",
+             (unsigned)config.tx_network, (unsigned)config.audio_policy,
+             config.fmo_mqtt_no_local ? "true" : "false");
     ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, chunk,
                                                HTTPD_RESP_USE_STRLEN), TAG,
                         "server JSON header");
@@ -906,12 +907,14 @@ static esp_err_t server_config_post(httpd_req_t *request)
     char *body = receive_small_form(request);
     if (body == NULL) return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                                  "invalid body");
-    char tx[8], policy[8];
+    char tx[8], policy[8], no_local[8];
     bool valid = form_value(body, "tx_network", tx, sizeof(tx)) &&
-                 form_value(body, "audio_policy", policy, sizeof(policy));
+                 form_value(body, "audio_policy", policy, sizeof(policy)) &&
+                 form_value(body, "no_local", no_local, sizeof(no_local));
     free(body);
     if (!valid || (strcmp(tx, "0") != 0 && strcmp(tx, "1") != 0) ||
-        (strcmp(policy, "0") != 0 && strcmp(policy, "1") != 0)) {
+        (strcmp(policy, "0") != 0 && strcmp(policy, "1") != 0) ||
+        (strcmp(no_local, "0") != 0 && strcmp(no_local, "1") != 0)) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                    "invalid policy");
     }
@@ -919,9 +922,11 @@ static esp_err_t server_config_post(httpd_req_t *request)
     config_store_load(&config);
     config.tx_network = (uint8_t)(tx[0] - '0');
     config.audio_policy = (uint8_t)(policy[0] - '0');
+    config.fmo_mqtt_no_local = no_local[0] == '1';
     if (config_store_save(&config) != ESP_OK) return httpd_resp_send_500(request);
     audio_passthrough_set_audio_policy(config.audio_policy);
     audio_passthrough_set_tx_network(config.tx_network);
+    fmo_link_update_config(&config);
     return httpd_resp_sendstr(request, "OK");
 }
 

@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "mqtt_client.h"
+#include "mqtt5_client.h"
 #include "sodium.h"
 #include "services/fmo_cert_store.h"
 #include "services/fmo_frame.h"
@@ -32,6 +33,7 @@ static opus_voice_decoder_t *s_opus_decoder;
 static opus_voice_encoder_t *s_tx_encoder;
 static SemaphoreHandle_t s_client_mutex;
 static uint8_t *s_raw;
+static bool s_no_local = true;
 static size_t s_raw_size;
 static size_t s_raw_expected;
 static char s_active_key[FMO_SERVER_KEY_MAX];
@@ -115,12 +117,26 @@ static void mqtt_event(void *argument, esp_event_base_t base,
     (void)base;
     esp_mqtt_event_t *event = event_data;
     if (event_id == MQTT_EVENT_CONNECTED) {
+        bool no_local;
+        portENTER_CRITICAL(&s_lock);
+        no_local = s_no_local;
+        portEXIT_CRITICAL(&s_lock);
+        esp_mqtt5_subscribe_property_config_t property = {
+            .no_local_flag = no_local,
+        };
+        esp_err_t property_error =
+            esp_mqtt5_client_set_subscribe_property(event->client, &property);
+        if (property_error != ESP_OK) {
+            ESP_LOGW(TAG, "failed to set MQTT 5 No Local: %s",
+                     esp_err_to_name(property_error));
+        }
         esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
         portENTER_CRITICAL(&s_lock);
         s_status.connected = true;
         s_status.last_error = ESP_OK;
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "connected and subscribed FMO/RAW");
+        ESP_LOGI(TAG, "connected and subscribed FMO/RAW (No Local=%u)",
+                 no_local ? 1u : 0u);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
         portENTER_CRITICAL(&s_lock);
         s_status.connected = false;
@@ -231,7 +247,7 @@ static esp_err_t start_client(const fmo_server_t *server)
         .credentials.client_id = client_id,
         .credentials.authentication.password = password,
         .session.keepalive = 60,
-        .session.protocol_ver = MQTT_PROTOCOL_V_3_1_1,
+        .session.protocol_ver = MQTT_PROTOCOL_V_5,
         .network.reconnect_timeout_ms = 10000,
         .network.timeout_ms = 10000,
         .network.disable_auto_reconnect = true,
@@ -325,6 +341,7 @@ esp_err_t fmo_link_start(const fmo_config_t *config)
                  config->fmo_server_key);
         snprintf(s_configured_callsign, sizeof(s_configured_callsign), "%s",
                  config->fmo_callsign);
+        s_no_local = config->fmo_mqtt_no_local;
     }
     s_raw = malloc(RAW_MAX_SIZE);
     if (s_raw == NULL) return ESP_ERR_NO_MEM;
@@ -352,6 +369,10 @@ void fmo_link_update_config(const fmo_config_t *config)
              config->fmo_server_key);
     snprintf(s_configured_callsign, sizeof(s_configured_callsign), "%s",
              config->fmo_callsign);
+    if (s_no_local != config->fmo_mqtt_no_local) {
+        s_no_local = config->fmo_mqtt_no_local;
+        s_recreate_client = true;
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
