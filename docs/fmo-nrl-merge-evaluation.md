@@ -36,7 +36,7 @@
 - **RAM/PSRAM**：MQTT 客户端（esp-mqtt）~20KB，SAS 凭据构建（CBOR+Ed25519，mbedtls 已有）~10KB，编解码：IMA ADPCM 纯查表 ~2KB（实网主流格式，成本远低于 Opus），Opus 8kHz 实例 ~30KB（仅兼容老格式时需要，现有 16kHz 实例复用同一库），帧缓冲 <10KB；峰值增量 <100KB，PSRAM 无压力；
 - **任务**：新增 `fmo_link` 任务（MQTT+帧封包）与 `fmo_discover`（APRS 解析，可并入 aprs_service 任务）；优先级与 nrl_link 同级即可；
 - **音频路由**：AudioRouter 增加 FMO 源/汇（8kHz ADPCM/Opus ↔ I2S），与 NRL（8/16kHz）共存；PTT 仲裁沿用现有事件队列——**同一时刻只允许一个制式收发**；
-- **证书存储**：userCert/devicekey/int CA 约 1.5KB，建议存 NVS blob（json）或 LittleFS；本板 eFuse 未烧 FMO HMAC 密钥，**不做 .enc 兼容**（原厂格式仅用于从备份迁移，sim 已完成迁移工具）；
+- **证书存储**：userCert/devicekey/int CA 约 1.5KB，建议存 NVS blob（json）或 LittleFS
 - **风险**：MQTT 长连接与 Wi-Fi 共存已属常态；无明显硬阻塞点。
 
 ## 4. 合并形态
@@ -68,7 +68,7 @@
 | --- | --- | --- |
 | `fmo_auth.py`（SAS 凭据） | `services/fmo_auth.c` | CBOR+Ed25519 用 mbedtls；cbor2 → 手写 200 行编码器（字段固定） |
 | `fmo_frame.py`（帧封包/CRC32） | `services/fmo_frame.c` | 已 3053/3053 字节级验证，直接翻译 |
-| `mqtt_client.py` | `services/fmo_link.c` | 用 esp-mqtt；keepalive=60；client id `FMO-<呼号>-<uid>-<MAC尾>` |
+| `mqtt_client.py` | `services/fmo_link.c` | 用 esp-mqtt；keepalive=60；client id `FMO-<呼号>-<uid>-<4位启动随机后缀>` |
 | `aprs.py`（FMO-V4/STATION/CERT 解析） | 并入 `services/aprs_service.c` | 新增 FMO 载荷解析器；GBK/UTF-8 双编码兼容注意 |
 | `fmo_station.py`（pubStationList.csv） | `services/server_directory.c` 扩展 | 服务器表缓存格式兼容（可选） |
 | `audio_tx.py`/`audio_rx.py`（Opus 8k） | `audio/opus_voice.c` 扩展 | 现有 opus 封装加 8kHz/40ms 配置档 |

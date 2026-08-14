@@ -9,7 +9,6 @@
 #include "audio/ima_adpcm.h"
 #include "audio/opus_voice.h"
 #include "esp_log.h"
-#include "esp_mac.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -38,6 +37,7 @@ static size_t s_raw_expected;
 static char s_active_key[FMO_SERVER_KEY_MAX];
 static char s_requested_key[FMO_SERVER_KEY_MAX];
 static char s_configured_callsign[16] = "NOCALL";
+static uint16_t s_client_suffix;
 static int64_t s_voice_until_us;
 static bool s_recreate_client;
 
@@ -209,7 +209,6 @@ static esp_err_t start_client(const fmo_server_t *server)
              server->callsign);
     portEXIT_CRITICAL(&s_lock);
     char username[16], client_id[48];
-    uint8_t mac[6] = {0};
     char *password = NULL;
     esp_err_t error = fmo_cert_store_build_credentials(
         server, "user", username, sizeof(username), &password);
@@ -219,9 +218,11 @@ static esp_err_t start_client(const fmo_server_t *server)
         portEXIT_CRITICAL(&s_lock);
         return error;
     }
-    (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(client_id, sizeof(client_id), "FMO-%s-%lu-%02X%02X", username,
-             (unsigned long)server->uid, mac[4], mac[5]);
+    snprintf(client_id, sizeof(client_id), "FMO-%s-%lu-%04X", username,
+             (unsigned long)server->uid, (unsigned)s_client_suffix);
+    portENTER_CRITICAL(&s_lock);
+    snprintf(s_status.client_id, sizeof(s_status.client_id), "%s", client_id);
+    portEXIT_CRITICAL(&s_lock);
     esp_mqtt_client_config_t mqtt_config = {
         .broker.address.hostname = server->host,
         .broker.address.port = server->port,
@@ -264,8 +265,8 @@ static esp_err_t start_client(const fmo_server_t *server)
     }
     xSemaphoreGive(s_client_mutex);
     snprintf(s_active_key, sizeof(s_active_key), "%s", server->key);
-    ESP_LOGI(TAG, "connecting %s (%s:%u)", server->name, server->host,
-             (unsigned)server->port);
+    ESP_LOGI(TAG, "connecting %s (%s:%u, client id=%s)", server->name,
+             server->host, (unsigned)server->port, client_id);
     return ESP_OK;
 }
 
@@ -318,6 +319,7 @@ static void control_task(void *argument)
 esp_err_t fmo_link_start(const fmo_config_t *config)
 {
     if (s_task != NULL) return ESP_OK;
+    s_client_suffix = (uint16_t)esp_random();
     if (config != NULL) {
         snprintf(s_requested_key, sizeof(s_requested_key), "%s",
                  config->fmo_server_key);

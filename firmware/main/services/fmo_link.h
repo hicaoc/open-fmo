@@ -14,6 +14,7 @@ typedef struct {
     esp_err_t last_error;
     char server_name[FMO_SERVER_NAME_MAX];
     char server_callsign[16];
+    char client_id[48];
     char voice_callsign[8];
     char voice_codec[8];
     uint32_t rx_frames;

@@ -181,6 +181,7 @@ static const char k_index_html_v2[] =
     "+'\u4e9a\u97f3: RX='+s.rx_ctcss+' TX='+s.tx_ctcss+'  \u9759\u566a: '+s.squelch+'  \u529f\u7387: '+s.tx_power+'\\n'"
     "+'\u7535\u53f0\u97f3\u91cf: RX='+s.rx_volume+' TX='+s.tx_volume+'  \u7f16\u7801: '+s.voice_codec+'\\n'"
     "+'APRS: '+(s.aprs_connected?'\u5df2\u8fde\u63a5':'\u672a\u8fde\u63a5')+' RX:'+s.aprs_rx+' TX:'+s.aprs_tx+'\\n'"
+    "+'FMO MQTT: '+(s.fmo_connected?'\u5df2\u8fde\u63a5':'\u672a\u8fde\u63a5')+'  Client ID: '+(s.mqtt_client_id||'---')+'\\n'"
     "+'SQL: '+(s.sql_active?'\u6253\u5f00':'\u5173\u95ed')+'  PTT: '+(s.network_ptt?'\u53d1\u5c04':'\u5f85\u673a')}).catch(()=>{})}"
     "async function scanWifi(){wifi_list.innerHTML='<option>\u6b63\u5728\u626b\u63cf...</option>';"
     "try{let r=await fetch('/scan',{cache:'no-store'});if(!r.ok)throw Error(await r.text());let a=await r.json();"
@@ -690,6 +691,8 @@ static esp_err_t status_get(httpd_req_t *request)
     network_manager_get_status(&network);
     aprs_status_t aprs = {0};
     aprs_service_get_status(&aprs);
+    fmo_link_status_t fmo = {0};
+    fmo_link_get_status(&fmo);
     uint8_t vu_mic = 0, vu_spk = 0;
     status_io_get_vu(&vu_mic, &vu_spk);
     char json[1024];
@@ -703,6 +706,7 @@ static esp_err_t status_get(httpd_req_t *request)
         "\"rx_volume\":%u,\"tx_volume\":%u,"
         "\"voice_codec\":\"%s\","
         "\"aprs_connected\":%s,\"aprs_rx\":%lu,\"aprs_tx\":%lu,"
+        "\"fmo_connected\":%s,\"mqtt_client_id\":\"%s\","
         "\"callsign\":\"%s\",\"ssid\":%u,"
         "\"sql_active\":%s,\"network_ptt\":%s,"
         "\"vu_mic\":%u,\"vu_spk\":%u}",
@@ -718,6 +722,7 @@ static esp_err_t status_get(httpd_req_t *request)
         config.voice_codec == 1 ? "OPUS" : "G711",
         aprs.connected ? "true" : "false",
         (unsigned long)aprs.rx_count, (unsigned long)aprs.tx_count,
+        fmo.connected ? "true" : "false", fmo.client_id,
         config.callsign, (unsigned)config.callsign_ssid,
         status_io_is_sql_active() ? "true" : "false",
         status_io_is_network_ptt() ? "true" : "false",
