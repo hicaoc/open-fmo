@@ -34,6 +34,8 @@
 #include "services/storage_fs.h"
 #include "services/fmo_discovery.h"
 #include "services/fmo_link.h"
+#include "services/fmo_qso.h"
+#include "services/fmo_station_beacon.h"
 #include "services/serial_at.h"
 #include "esp_sntp.h"
 
@@ -310,6 +312,19 @@ void app_main(void)
     if (fmo_err != ESP_OK) {
         ESP_LOGW(TAG, "fmo_link_start failed: %s", esp_err_to_name(fmo_err));
     }
+    /* FMO-V4 STATION broadcast (own-server advertisement via APRS-IS);
+     * runs gated on link/role/APRS state, so start order is not critical. */
+    esp_err_t beacon_err = fmo_station_beacon_start(&config);
+    if (beacon_err != ESP_OK) {
+        ESP_LOGW(TAG, "fmo_station_beacon_start failed: %s",
+                 esp_err_to_name(beacon_err));
+    }
+    /* FMO QSO call signaling (APFMO0 messages + MQTT QSO records); gated on
+     * APRS/link state at runtime, so start order is not critical. */
+    esp_err_t qso_err = fmo_qso_start(&config);
+    if (qso_err != ESP_OK) {
+        ESP_LOGW(TAG, "fmo_qso_start failed: %s", esp_err_to_name(qso_err));
+    }
     ESP_ERROR_CHECK(espnow_link_start(&config));
     /* Net radio: station list (NVS) + decoder registration; the player task
      * starts on demand when a station is played. */
@@ -357,10 +372,31 @@ void app_main(void)
                 }
             }
         }
+        /* Incoming FMO call: pull the UI back to the main page so the
+         * ringing overlay (and the answer/reject knob hint) is visible. */
+        fmo_qso_status_t qso_poll = {0};
+        fmo_qso_get_status(&qso_poll);
+        if (qso_poll.incoming && ui.page != APP_UI_MAIN) {
+            ui.page = APP_UI_MAIN;
+            render_needed = true;
+        }
         encoder_event_t event;
         if (xQueueReceive(encoder_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
             last_input_at_us = esp_timer_get_time();
-            if (event.type == ENCODER_EVENT_PRESS) {
+            fmo_qso_status_t qso_status = {0};
+            fmo_qso_get_status(&qso_status);
+            if (qso_status.incoming) {
+                /* Incoming FMO call: knob short press answers, long press
+                 * rejects; all other knob actions are swallowed while
+                 * ringing so the call is never answered accidentally. */
+                if (event.type == ENCODER_EVENT_PRESS) {
+                    fmo_qso_answer(true);
+                    ESP_LOGI(TAG, "FMO call answered");
+                } else if (event.type == ENCODER_EVENT_LONG_PRESS) {
+                    fmo_qso_answer(false);
+                    ESP_LOGI(TAG, "FMO call rejected");
+                }
+            } else if (event.type == ENCODER_EVENT_PRESS) {
                 fmo_config_t fresh;
                 esp_err_t tx_error = config_store_load(&fresh);
                 if (tx_error == ESP_OK) {

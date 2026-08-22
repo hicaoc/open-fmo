@@ -1,6 +1,7 @@
 #include "config_store.h"
 
 #include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -55,6 +56,15 @@ void config_store_defaults(fmo_config_t *config)
     config->aprs_nrl_rx = true;  /* decode AFSK from NRL downlink */
     config->aprs_nrl_tx = false;
     config->aprs_fwd = FMO_APRS_FWD_DEFAULT;
+    /* FMO-V4 STATION broadcast: off by default; the operator fills the
+     * station name / country code on the APRS config page; online/peak
+     * stay 0 (= automatic) unless the operator overrides them. */
+    config->fmo_station_beacon_enabled = false;
+    config->fmo_station_beacon_interval_min = 10;
+    config->fmo_coverage_km = 100;
+    /* FMO personal BEACON: off by default, freq 0 keeps the send gate
+     * closed until the operator fills a frequency in. */
+    config->fmo_beacon_enabled = false;
 }
 
 esp_err_t config_store_init(void)
@@ -189,6 +199,46 @@ esp_err_t config_store_load(fmo_config_t *config)
         config->fmo_mqtt_no_local = true;
         migrated = true;
         ESP_LOGI(TAG, "migrated v15 config to v16 (MQTT 5 No Local enabled)");
+    } else if (stored.schema_version == 16 && size <= sizeof(stored)) {
+        memcpy(config, &stored, size);
+        config->schema_version = FMO_CONFIG_SCHEMA_VERSION;
+        /* Tail fields keep the defaults set above (broadcast off, 10 min,
+         * 100 km coverage, empty name/country, zero counters). */
+        migrated = true;
+        ESP_LOGI(TAG, "migrated v16 config to v17 (FMO station broadcast)");
+    } else if (stored.schema_version == 17 && size <= sizeof(stored)) {
+        /* v17 stored fmo_station_name[49]; widening it to 97 bytes (32 CJK
+         * chars in UTF-8) shifted the tail fields, so copy the blob
+         * piecewise instead of a straight memcpy.  The old name already
+         * fits in 49 bytes and is kept as-is. */
+        typedef struct {
+            char name[49];
+            char country[3];
+            uint16_t coverage_km;
+            uint16_t online;
+            uint16_t peak;
+        } config_v17_tail_t;
+        const size_t head_size = offsetof(fmo_config_t, fmo_station_name);
+        config_v17_tail_t tail;
+        memcpy(&tail, (const uint8_t *)&stored + head_size, sizeof(tail));
+        memcpy(config, &stored, head_size);
+        memcpy(config->fmo_station_name, tail.name, sizeof(tail.name) - 1);
+        config->fmo_station_name[sizeof(tail.name) - 1] = '\0';
+        memcpy(config->fmo_country, tail.country, sizeof(tail.country));
+        config->fmo_coverage_km = tail.coverage_km;
+        config->fmo_station_online = tail.online;
+        config->fmo_station_peak = tail.peak;
+        config->schema_version = FMO_CONFIG_SCHEMA_VERSION;
+        migrated = true;
+        ESP_LOGI(TAG, "migrated v17 config to v18 (32-char station name)");
+    } else if (stored.schema_version == 18 && size <= sizeof(stored)) {
+        /* v19 only appends the personal-beacon tail, so the v18 blob is a
+         * strict prefix of the new layout: a plain copy on top of the
+         * defaults above (beacon off, empty texts, zero freq) is enough. */
+        memcpy(config, &stored, size);
+        config->schema_version = FMO_CONFIG_SCHEMA_VERSION;
+        migrated = true;
+        ESP_LOGI(TAG, "migrated v18 config to v19 (personal beacon)");
     } else if (size == sizeof(stored) &&
                stored.schema_version == FMO_CONFIG_SCHEMA_VERSION) {
         *config = stored;
@@ -213,6 +263,19 @@ esp_err_t config_store_load(fmo_config_t *config)
     config->nrl_server_key[sizeof(config->nrl_server_key) - 1] = '\0';
     config->fmo_server_key[sizeof(config->fmo_server_key) - 1] = '\0';
     config->fmo_host[sizeof(config->fmo_host) - 1] = '\0';
+    config->fmo_station_name[sizeof(config->fmo_station_name) - 1] = '\0';
+    config->fmo_country[sizeof(config->fmo_country) - 1] = '\0';
+    config->fmo_rig[sizeof(config->fmo_rig) - 1] = '\0';
+    config->fmo_ant[sizeof(config->fmo_ant) - 1] = '\0';
+    config->fmo_aprs_msg[sizeof(config->fmo_aprs_msg) - 1] = '\0';
+    config->fmo_notice[sizeof(config->fmo_notice) - 1] = '\0';
+    config->fmo_qso_msg[sizeof(config->fmo_qso_msg) - 1] = '\0';
+    if (config->fmo_station_beacon_interval_min != 5 &&
+        config->fmo_station_beacon_interval_min != 10 &&
+        config->fmo_station_beacon_interval_min != 60) {
+        config->fmo_station_beacon_interval_min = 10;
+    }
+    if (config->fmo_coverage_km > 5000) config->fmo_coverage_km = 5000;
     if (config->ui_language > 1) config->ui_language = 1;
     if (config->voice_codec > 1) config->voice_codec = 0;
     if (config->tx_network > 1) config->tx_network = 0;

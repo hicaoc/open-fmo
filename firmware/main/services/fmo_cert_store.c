@@ -498,3 +498,88 @@ done:
     free(key_raw);
     return result;
 }
+
+esp_err_t fmo_cert_store_build_cert_blob(uint8_t *out, size_t capacity,
+                                         size_t *out_size)
+{
+    if (out == NULL || out_size == NULL) return ESP_ERR_INVALID_ARG;
+    uint8_t *raw = NULL;
+    size_t size = 0;
+    cJSON *json = NULL;
+    esp_err_t result = read_json(USER_FILE, &raw, &size, &json);
+    if (result != ESP_OK) return result;
+    user_cert_t cert;
+    if (!parse_user(json, &cert)) {
+        result = ESP_ERR_INVALID_ARG;
+        goto done;
+    }
+    cbor_writer_t writer = {.data = out, .capacity = capacity, .ok = true};
+    cbor_head(&writer, 4, 10);
+    cbor_text(&writer, "FMO");
+    cbor_uint(&writer, 4);
+    cbor_text(&writer, "userCert");
+    cbor_uint(&writer, cert.issuer_sn);
+    cbor_text(&writer, cert.callsign);
+    cbor_uint(&writer, cert.uid);
+    cbor_blob(&writer, cert.public_key, sizeof(cert.public_key));
+    cbor_uint(&writer, cert.iat);
+    cbor_uint(&writer, cert.exp);
+    cbor_blob(&writer, cert.signature, sizeof(cert.signature));
+    if (!writer.ok) {
+        result = ESP_ERR_INVALID_SIZE;
+        goto done;
+    }
+    *out_size = writer.size;
+    result = ESP_OK;
+
+done:
+    cJSON_Delete(json);
+    free(raw);
+    return result;
+}
+
+esp_err_t fmo_cert_store_sign(const uint8_t *tbs, size_t tbs_size,
+                              uint8_t signature[64])
+{
+    if (tbs == NULL || tbs_size == 0 || signature == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t *user_raw = NULL, *key_raw = NULL;
+    size_t size = 0;
+    cJSON *user_json = NULL, *key_json = NULL;
+    esp_err_t result = read_json(USER_FILE, &user_raw, &size, &user_json);
+    if (result != ESP_OK) goto done;
+    result = read_json(KEY_FILE, &key_raw, &size, &key_json);
+    if (result != ESP_OK) goto done;
+
+    user_cert_t cert;
+    device_key_t key;
+    uint8_t public_key[32], secret[64];
+    if (!parse_user(user_json, &cert) || !parse_key(key_json, &key) ||
+        crypto_sign_seed_keypair(public_key, secret, key.seed) != 0 ||
+        sodium_memcmp(public_key, key.public_key, 32) != 0 ||
+        sodium_memcmp(public_key, cert.public_key, 32) != 0) {
+        sodium_memzero(secret, sizeof(secret));
+        result = ESP_ERR_INVALID_STATE;
+        goto done;
+    }
+    time_t now = time(NULL);
+    if (now >= 1700000000 &&
+        ((uint64_t)now < cert.iat || (uint64_t)now >= cert.exp)) {
+        /* Expired / not-yet-valid certificate stops signed broadcasts,
+         * mirroring the original firmware's guard. */
+        sodium_memzero(secret, sizeof(secret));
+        result = ESP_ERR_INVALID_STATE;
+        goto done;
+    }
+    result = crypto_sign_detached(signature, NULL, tbs, tbs_size, secret) == 0
+        ? ESP_OK : ESP_FAIL;
+    sodium_memzero(secret, sizeof(secret));
+
+done:
+    cJSON_Delete(user_json);
+    cJSON_Delete(key_json);
+    free(user_raw);
+    free(key_raw);
+    return result;
+}

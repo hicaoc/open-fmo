@@ -18,6 +18,7 @@
 #include "services/config_store.h"
 #include "services/fmo_discovery.h"
 #include "services/fmo_link.h"
+#include "services/fmo_qso.h"
 #include "services/network_manager.h"
 #include "services/net_radio.h"
 #include "services/nrl_link.h"
@@ -737,9 +738,61 @@ static void render_station_preview(gfx_canvas_t *canvas)
     }
 }
 
-static void render_main(const app_ui_t *ui, gfx_canvas_t *canvas)
+/* FMO QSO signaling overlay: incoming-call popup (knob short press answers,
+ * long press rejects), outgoing-call progress, and an established marker. */
+static void render_qso_overlay(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
-    char top[64];
+    fmo_qso_status_t qso = {0};
+    fmo_qso_get_status(&qso);
+    switch (qso.phase) {
+    case FMO_QSO_PHASE_INCOMING: {
+        const bool blink = ((esp_timer_get_time() / 500000LL) & 1) == 0;
+        const uint16_t bg = blink ? COLOR_RED : COLOR_ORANGE;
+        gfx_fill_rect(canvas, 20, 40, 388, 62, bg);
+        gfx_rect(canvas, 20, 40, 388, 62, COLOR_WHITE);
+        gfx_text(canvas, 32, 46, tr(ui, "FMO incoming call",
+                                    "FMO \u6765\u7535"),
+                 2, COLOR_BLACK, bg, 180);
+        gfx_text(canvas, 32, 64, qso.peer, 2, COLOR_BLACK, bg, 240);
+        gfx_text(canvas, 32, 84,
+                 tr(ui, "press = answer, hold = reject",
+                    "\u77ed\u6309\u63a5\u542c  \u957f\u6309\u62d2\u7edd"),
+                 1, COLOR_BLACK, bg, 364);
+        break;
+    }
+    case FMO_QSO_PHASE_QUERYING:
+    case FMO_QSO_PHASE_JUMPING:
+    case FMO_QSO_PHASE_CALLING:
+    case FMO_QSO_PHASE_RINGING:
+    case FMO_QSO_PHASE_FAILED: {
+        const bool failed = qso.phase == FMO_QSO_PHASE_FAILED;
+        const uint16_t border = failed ? COLOR_RED : COLOR_ORANGE;
+        gfx_fill_rect(canvas, 60, 50, 308, 42, COLOR_BLACK);
+        gfx_rect(canvas, 60, 50, 308, 42, border);
+        char line[64];
+        snprintf(line, sizeof(line), "%s %s",
+                 failed ? tr(ui, "call failed", "\u547c\u53eb\u5931\u8d25")
+                        : tr(ui, "calling", "\u547c\u53eb\u4e2d"),
+                 qso.peer);
+        gfx_text(canvas, 68, 56, line, 2, border, COLOR_BLACK, 292);
+        gfx_text(canvas, 68, 76, qso.detail, 1, COLOR_WHITE, COLOR_BLACK,
+                 292);
+        break;
+    }
+    case FMO_QSO_PHASE_ESTABLISHED: {
+        char line[40];
+        snprintf(line, sizeof(line), "QSO:%s", qso.peer);
+        gfx_fill_rect(canvas, 8, 61, 198, 18, COLOR_BLACK);
+        gfx_text(canvas, 8, 63, line, 2, COLOR_ORANGE, COLOR_BLACK, 198);
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+static void render_main(const app_ui_t *ui, gfx_canvas_t *canvas)
+{    char top[64];
     char tx_ctcss[12];
     char rx_ctcss[12];
     char server_line[160];
@@ -1173,6 +1226,9 @@ static void render_main(const app_ui_t *ui, gfx_canvas_t *canvas)
     gfx_fill_rect(canvas, 360, 133, 65, 5, COLOR_DARK);
     int spk_w = (vu_spk * 65) / 255;
     if (spk_w > 0) gfx_fill_rect(canvas, 360, 133, spk_w, 5, COLOR_ORANGE);
+
+    /* FMO QSO signaling overlay covers everything else while active */
+    render_qso_overlay(ui, canvas);
 }
 
 static void render_menu(const app_ui_t *ui, gfx_canvas_t *canvas)
