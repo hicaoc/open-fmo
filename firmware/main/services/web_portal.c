@@ -68,14 +68,57 @@ static const char k_nav_html[] =
     ".nav a:hover,.nav a:focus{background:#f80;color:#000}@media(max-width:560px){.nav{grid-template-columns:1fr}.nav a{min-height:60px}}</style></head>"
     "<body><h1>Open FMO</h1><p class=hint>&#35831;&#36873;&#25321;&#35201;&#37197;&#32622;&#30340;&#39033;&#30446;&#65292;&#27599;&#39033;&#21333;&#29420;&#20445;&#23384;&#12290;</p><nav class=nav>"
     "<a href=/config/identity>NRL &#21628;&#21495;&#19982;&#26381;&#21153;&#22120;</a>"
-    "<a href=/config/fmo-identity>FMO &#21628;&#21495;&#19982; SSID</a>"
+    "<a href=/servers>FMO &#26381;&#21153;&#22120;&#19982;&#35777;&#20070;</a>"
     "<a href=/config/wifi>Wi-Fi &#37197;&#32593;</a>"
-    "<a href=/config/radio>&#23556;&#39057;&#19982;&#38899;&#39057;</a>"
+    "<a href=/config/radio>&#23556;&#39057;&#26495;&#35774;&#32622;</a>"
+    "<a href=/config/audio>&#38899;&#39057;&#35774;&#32622;</a>"
     "<a href=/config/aprs>APRS-IS &#35774;&#32622;</a>"
     "<a href=/config/netradio>&#32593;&#32476;&#30005;&#21488;</a>"
-    "<a href=/servers>NRL / FMO &#26381;&#21153;&#22120;</a>"
     "<a href=/update>&#22266;&#20214;&#21319;&#32423; / OTA</a>"
     "</nav></body></html>";
+
+/* Keep provisioning independent from the full settings page.  The full page
+ * queries services which are deliberately not started while BLE provisioning
+ * is active, and a JavaScript error there used to leave every form hidden. */
+static const char k_wifi_html[] =
+    "<!doctype html><html><head><meta charset=utf-8>"
+    "<meta name=viewport content='width=device-width,initial-scale=1'>"
+    "<title>Open FMO Wi-Fi</title><style>"
+    "body{font:16px sans-serif;max-width:620px;margin:auto;padding:18px;background:#111;color:#eee}"
+    "fieldset{border:1px solid #f80;border-radius:8px;padding:14px}"
+    "label{display:block;margin:12px 0}input,select,button{box-sizing:border-box;font:inherit;padding:10px;width:100%}"
+    "button{margin:8px 0;background:#f80;border:0;font-weight:bold}a{color:#f80}.hint{color:#aaa}"
+    ".saved{display:flex;gap:8px;align-items:center;margin:8px 0}.saved span{flex:1}.saved button{width:auto;margin:0}"
+    "#msg{min-height:24px}</style></head><body>"
+    "<p><a href=/>&lt; &#36820;&#22238;</a></p><h1>Wi-Fi &#37197;&#32593;</h1>"
+    "<p class=hint>&#36830;&#25509; OpenFMO-xxxx &#28909;&#28857;&#21518;&#65292;&#22312;&#26412;&#39029;&#28155;&#21152;&#23478;&#37324;&#30340; Wi-Fi&#12290;</p>"
+    "<fieldset><legend>&#24050;&#20445;&#23384;&#30340;&#32593;&#32476;</legend><div id=saved>&#21152;&#36733;&#20013;...</div></fieldset>"
+    "<form id=form><fieldset><legend>&#28155;&#21152; Wi-Fi</legend>"
+    "<button type=button id=scanbtn>&#37325;&#26032;&#25195;&#25551;&#38468;&#36817; Wi-Fi</button>"
+    "<label>&#36873;&#25321;&#28909;&#28857;<select id=list><option value=''>-- &#27491;&#22312;&#35835;&#21462;&#28909;&#28857; --</option></select></label>"
+    "<label>SSID<input id=ssid name=wifi_ssid maxlength=32 required></label>"
+    "<label>&#23494;&#30721;<input name=wifi_password type=password maxlength=64></label>"
+    "<input type=hidden name=section value=wifi><button id=savebtn>&#20445;&#23384;&#24182;&#36830;&#25509;</button>"
+    "</fieldset></form><p id=msg></p><script>"
+    "const q=s=>document.querySelector(s),msg=q('#msg'),saved=q('#saved'),list=q('#list'),ssid=q('#ssid');"
+    "function esc(v){let d=document.createElement('div');d.textContent=v;return d.innerHTML}"
+    "async function load(){try{let r=await fetch('/api/wifi',{cache:'no-store'});if(!r.ok)throw Error(await r.text());"
+    "let d=await r.json();saved.innerHTML=d.profiles.length?'':'<span class=hint>\u6682\u65e0</span>';"
+    "d.profiles.forEach(x=>saved.innerHTML+='<div class=saved><span>'+esc(x.ssid)+'</span><button onclick=del('+x.index+')>\u5220\u9664</button></div>')}"
+    "catch(e){saved.textContent='\u52a0\u8f7d\u5931\u8d25: '+e.message}}"
+    "async function scan(url){let b=q('#scanbtn');b.disabled=true;b.textContent='\u626b\u63cf\u4e2d...';msg.textContent='';"
+    "try{let r=await fetch(url,{cache:'no-store'});if(!r.ok)throw Error(await r.text());let a=await r.json();"
+    "list.innerHTML='<option value=\"\">-- \u8bf7\u9009\u62e9 --</option>';a.forEach(x=>{let o=document.createElement('option');o.value=x.ssid;o.textContent=x.ssid+' ('+x.rssi+' dBm)';list.appendChild(o)});"
+    "msg.textContent='\u626b\u63cf\u5b8c\u6210\uff0c\u5171 '+a.length+' \u4e2a\u70ed\u70b9'}catch(e){msg.textContent='\u626b\u63cf\u5931\u8d25: '+e.message}"
+    "b.disabled=false;b.textContent='\u91cd\u65b0\u626b\u63cf\u9644\u8fd1 Wi-Fi'}"
+    "q('#scanbtn').onclick=()=>scan('/scan');"
+    "list.onchange=()=>{if(list.value)ssid.value=list.value};"
+    "q('#form').onsubmit=async e=>{e.preventDefault();let b=q('#savebtn');b.disabled=true;msg.textContent='\u4fdd\u5b58\u4e2d...';"
+    "try{let r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(new FormData(e.target))});"
+    "if(!r.ok)throw Error(await r.text());msg.textContent='\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u8fde\u63a5 Wi-Fi...';await load()}"
+    "catch(x){msg.textContent='\u4fdd\u5b58\u5931\u8d25: '+x.message}b.disabled=false};"
+    "async function del(i){if(!confirm('\u5220\u9664\u8fd9\u4e2a Wi-Fi\uff1f'))return;let r=await fetch('/wifi/delete',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'index='+i});if(r.ok)load();else msg.textContent=await r.text()}"
+    "load();scan('/scan/cached')</script></body></html>";
 
 static const char k_index_html_v2[] =
     "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -83,6 +126,7 @@ static const char k_index_html_v2[] =
     "fieldset{margin:12px 0;border:1px solid #f80}label{display:grid;grid-template-columns:1fr 1.5fr;margin:7px}"
     "input,select,button{font:inherit;padding:7px}button{background:#f80;border:0;font-weight:bold;cursor:pointer}.wide{width:100%}"
     "button:disabled{opacity:.5;cursor:wait}.saved{display:flex;gap:8px;align-items:center;margin:7px}.saved span{flex:1}.hint{color:#aaa}a{color:#f80}.page,#netradio,#status{display:none}"
+    "table{width:100%;border-collapse:collapse}th,td{padding:7px;border-bottom:1px solid #333;text-align:left}tr.sel{background:#352000}.pick{white-space:nowrap}"
     "#toast{position:fixed;top:12px;left:50%;transform:translateX(-50%);padding:10px 24px;border-radius:6px;font-weight:bold;display:none;z-index:99}"
     "#toast.ok{display:block;background:#0a0;color:#fff}#toast.err{display:block;background:#d00;color:#fff}"
     "#tone_ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:50;justify-content:center;align-items:center}"
@@ -95,13 +139,10 @@ static const char k_index_html_v2[] =
     "<p class=hint>&#37197;&#32622;&#28909;&#28857;&#20813;&#23494;&#30721;&#65306;&#36830;&#25509; OpenFMO-xxxx &#21518;&#35775;&#38382; 192.168.4.1&#12290;</p>"
     "<form class=page data-page=identity onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=identity>"
     "<fieldset id=identity><legend>NRL &#36523;&#20221;</legend><label>NRL &#21628;&#21495;<input name=callsign></label><label>NRL SSID<input name=callsign_ssid type=number min=0 max=255></label>"
-    "<label>NRL &#26381;&#21153;&#22120;<input name=nrl_host></label><label>NRL &#31471;&#21475;<input name=nrl_port type=number></label>"
-    "<button class=wide>&#21333;&#29420;&#20445;&#23384;</button></fieldset></form>"
-    "<form class=page data-page=fmo-identity onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=fmo_identity>"
-    "<fieldset><legend>FMO &#36523;&#20221;</legend><label>FMO &#21628;&#21495;<input name=fmo_callsign maxlength=6 autocapitalize=characters></label>"
-    "<label>FMO SSID<input name=fmo_callsign_ssid type=number min=0 max=15></label>"
-    "<p class=hint>FMO &#22522;&#30784;&#21628;&#21495;&#24517;&#39035;&#19982; userCert &#20013;&#30340;&#21628;&#21495;&#19968;&#33268;&#65307;SSID &#20165;&#29992;&#20110; FMO APRS &#36523;&#20221;&#12290;</p>"
-    "<button class=wide>&#21333;&#29420;&#20445;&#23384;</button></fieldset></form>"
+    "<label>&#24403;&#21069; NRL &#26381;&#21153;&#22120;<input name=nrl_host></label><label>&#24403;&#21069; NRL &#31471;&#21475;<input name=nrl_port type=number></label>"
+    "<button class=wide>&#20445;&#23384; NRL &#37197;&#32622;</button></fieldset>"
+    "<fieldset><legend>NRL &#26381;&#21153;&#22120;&#21015;&#34920;</legend><p class=hint>&#36873;&#25321;&#21518;&#20250;&#31435;&#21363;&#26356;&#26032;&#19978;&#26041;&#30340;&#24403;&#21069;&#26381;&#21153;&#22120;&#12290;</p>"
+    "<table><thead><tr><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=nrl_servers><tr><td colspan=4>&#21152;&#36733;&#20013;...</td></tr></tbody></table></fieldset></form>"
     "<form class=page data-page=wifi onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=wifi>"
     "<fieldset id=wifi><legend>Wi-Fi &#37197;&#32593;&#65288;&#26368;&#22810; 5 &#20010;&#65289;</legend><div id=saved_wifi></div>"
     "<label>&#38468;&#36817; Wi-Fi<select id=wifi_list onchange=\"wifi_ssid.value=this.value\"><option>&#27491;&#22312;&#25195;&#25551;...</option></select></label>"
@@ -109,22 +150,28 @@ static const char k_index_html_v2[] =
     "<label>&#23494;&#30721;<input name=wifi_password type=password placeholder='&#30041;&#31354;&#21017;&#20445;&#30041;&#24050;&#23384;&#23494;&#30721;'></label>"
     "<button class=wide>&#28155;&#21152;&#32593;&#32476;</button></fieldset></form>"
     "<form class=page data-page=radio onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=radio>"
-    "<fieldset id=radio><legend>&#23556;&#39057;&#38899;&#39057;</legend><label>&#25509;&#25910; MHz<input name=rx_mhz type=number step=.0001></label>"
+    "<fieldset id=radio><legend>&#23556;&#39057;&#26495;&#35774;&#32622;</legend>"
+    "<label>&#21551;&#29992;&#23556;&#39057;&#26495;<input name=rf_enabled type=checkbox value=1></label>"
+    "<label>&#25509;&#25910; MHz<input name=rx_mhz type=number step=.0001></label>"
     "<label>&#21457;&#23556; MHz<input name=tx_mhz type=number step=.0001></label>"
     "<label>&#25509;&#25910;&#20122;&#38899;<button type=button id=rx_ctcss_btn onclick=\"tonePick('rx_ctcss')\">OFF</button><input type=hidden name=rx_ctcss id=rx_ctcss value=0></label>"
     "<label>&#21457;&#23556;&#20122;&#38899;<button type=button id=tx_ctcss_btn onclick=\"tonePick('tx_ctcss')\">OFF</button><input type=hidden name=tx_ctcss id=tx_ctcss value=0></label>"
     "<label>&#38745;&#22122; 0-10<input name=squelch type=number min=0 max=10></label>"
     "<label>&#21151;&#29575;<select name=tx_power><option value=0>&#20302;</option><option value=1>&#20013;</option><option value=2>&#39640;</option></select></label>"
-    "<label>&#21551;&#29992;&#23556;&#39057;<input name=rf_enabled type=checkbox value=1></label>"
-    "<label>&#35821;&#38899;&#32534;&#30721;<select name=voice_codec><option value=0>G.711 8kHz (&#20860;&#23481;)</option><option value=1>Opus 16kHz (&#23485;&#24102;)</option></select></label>"
-    "<label>&#30005;&#21488;RX&#38899;&#37327; 0-10<input name=rx_volume type=number min=0 max=10></label>"
-    "<label>&#30005;&#21488;TX&#38899;&#37327; 0-10<input name=tx_volume type=number min=0 max=10></label>"
+    "<label>&#23556;&#39057;&#26495; RX &#38899;&#37327; 0-10<input name=rx_volume type=number min=0 max=10></label>"
+    "<label>&#23556;&#39057;&#26495; TX &#38899;&#37327; 0-10<input name=tx_volume type=number min=0 max=10></label>"
+    "<label>&#39057;&#29575;&#20559;&#31227; Hz<input name=freq_tune type=number min=-5000 max=5000 step=10 placeholder=0></label>"
+    "<button class=wide>&#21333;&#29420;&#20445;&#23384;&#23556;&#39057;&#37197;&#32622;</button></fieldset></form>"
+    "<form class=page data-page=audio onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=audio>"
+    "<fieldset id=audio><legend>&#38899;&#39057;&#35774;&#32622;</legend>"
+    "<label>NRL &#35821;&#38899;&#32534;&#30721;<select name=voice_codec><option value=0>G.711 8kHz (&#20860;&#23481;)</option><option value=1>Opus 16kHz (&#23485;&#24102;)</option></select></label>"
     "<label>ES8311 &#25196;&#22768;&#22120; 0-255<input name=es8311_dac_vol type=number min=0 max=255></label>"
     "<label>ES8311 &#40614;&#20811;&#39118; 0-170<input name=es8311_adc_vol type=number min=0 max=170></label>"
     "<label>ES8311 &#32819;&#26426;&#36755;&#20986;&#39537;&#21160; (REG13 HPSW)<input name=es8311_hp_drive type=checkbox value=1></label>"
-        "<label>&#36719;&#20214;MIC&#22686;&#30410; 1-5<input name=mic_gain type=number min=1 max=5></label>"
-    "<label>&#39057;&#29575;&#20559;&#31227; Hz<input name=freq_tune type=number min=-5000 max=5000 step=10 placeholder=0></label>"
-    "<button class=wide>&#21333;&#29420;&#20445;&#23384;</button></fieldset></form>"
+    "<label>&#36719;&#20214; MIC &#22686;&#30410; 1-5<input name=mic_gain type=number min=1 max=5></label>"
+    "<label>&#40664;&#35748;&#21457;&#36865;&#32593;&#32476;<select name=tx_network><option value=0>NRL</option><option value=1>FMO (Opus)</option></select></label>"
+    "<label>NRL / FMO &#21516;&#26102;&#26469;&#35805;<select name=audio_policy><option value=0>&#28151;&#38899;</option><option value=1>&#20808;&#26469;&#20248;&#20808;</option></select></label>"
+    "<button class=wide>&#21333;&#29420;&#20445;&#23384;&#38899;&#39057;&#37197;&#32622;</button></fieldset></form>"
     "<form class=page data-page=aprs onsubmit='event.preventDefault();saveForm(this)'><input type=hidden name=section value=aprs>"
     "<fieldset id=aprs><legend>APRS-IS (&#22266;&#23450;&#22352;&#26631;)</legend><label>&#21551;&#29992; APRS<input name=aprs_enabled type=checkbox value=1></label>"
     "<label>&#20351;&#29992;&#22266;&#23450;&#22352;&#26631;<input name=aprs_position_set type=checkbox value=1></label><label>APRS SSID<input name=aprs_ssid type=number min=0 max=15></label>"
@@ -174,7 +221,7 @@ static const char k_index_html_v2[] =
     "<pre id=status>&#21152;&#36733;&#20013;...</pre>"
     "<div id=tone_ov onclick=\"if(event.target===this)this.classList.remove('open')\"><div id=tone_box><h3 id=tone_title></h3><div id=tone_grid></div></div></div>"
     "<script>"
-    "const PAGE=location.pathname.split('/').pop();const TITLES={identity:'NRL \u8eab\u4efd','fmo-identity':'FMO \u8eab\u4efd',wifi:'Wi-Fi \u914d\u7f51',radio:'\u5c04\u9891\u4e0e\u97f3\u9891',aprs:'APRS-IS \u8bbe\u7f6e',netradio:'\u7f51\u7edc\u7535\u53f0'};"
+    "const PAGE=location.pathname.split('/').pop();const TITLES={identity:'NRL \u547c\u53f7\u4e0e\u670d\u52a1\u5668',wifi:'Wi-Fi \u914d\u7f51',radio:'\u5c04\u9891\u677f\u8bbe\u7f6e',audio:'\u97f3\u9891\u8bbe\u7f6e',aprs:'APRS-IS \u8bbe\u7f6e',netradio:'\u7f51\u7edc\u7535\u53f0'};"
     "let panel=PAGE==='netradio'?document.getElementById('netradio'):document.querySelector('[data-page='+PAGE+']');if(panel)panel.style.display='block';page_title.textContent=TITLES[PAGE]||'Open FMO';"
     "let toastTimer;function toast(msg,ok){let t=document.getElementById('toast');t.textContent=msg;t.className=ok?'ok':'err';"
     "clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.className='',2500)}"
@@ -191,6 +238,8 @@ static const char k_index_html_v2[] =
     "btn.disabled=false;btn.textContent=btn.dataset.label||'\u4fdd\u5b58';return false}"
     "document.querySelectorAll('form button:not([type=button])').forEach(b=>b.dataset.label=b.textContent);"
     "function esc(s){let d=document.createElement('div');d.textContent=s;return d.innerHTML}"
+    "let nrlData=[];async function loadNrlServers(){let body=document.getElementById('nrl_servers');if(!body)return;try{let r=await fetch('/api/servers',{cache:'no-store'});if(!r.ok)throw Error(await r.text());let d=await r.json();nrlData=d.nrl||[];body.innerHTML='';nrlData.forEach((x,i)=>{let row=body.insertRow();row.className=x.selected?'sel':'';[x.name,x.host+':'+x.port,x.online+'/'+x.total].forEach(v=>{let c=row.insertCell();c.textContent=v});let c=row.insertCell(),b=document.createElement('button');b.type='button';b.className='pick';b.textContent=x.selected?'\u5f53\u524d':'\u9009\u62e9';b.disabled=!!x.selected;b.onclick=()=>selectNrl(i);c.appendChild(b)});if(!nrlData.length)body.innerHTML='<tr><td colspan=4 class=hint>\u6682\u65e0\u670d\u52a1\u5668</td></tr>'}catch(e){body.innerHTML='<tr><td colspan=4>'+esc(e.message)+'</td></tr>'}}"
+    "async function selectNrl(i){let x=nrlData[i];if(!x)return;try{let r=await fetch('/api/servers/select',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({kind:'nrl',key:x.key})});if(!r.ok)throw Error(await r.text());document.querySelector('[name=nrl_host]').value=x.host;document.querySelector('[name=nrl_port]').value=x.port;toast('\u2713 \u5df2\u5207\u6362\u5230 '+x.name,true);await loadNrlServers()}catch(e){toast('\u2717 '+e.message,false)}}"
     "function renderSaved(a){saved_wifi.innerHTML='<b>\u5df2\u4fdd\u5b58\u7684\u7f51\u7edc</b>';if(!a.length)saved_wifi.innerHTML+='<p class=hint>\u6682\u65e0</p>';"
     "a.forEach(x=>saved_wifi.innerHTML+='<div class=saved><span>'+(x.index+1)+'. '+esc(x.ssid)+'</span><button type=button onclick=delWifi('+x.index+')>\u5220\u9664</button></div>')}"
     "function loadConfig(){fetch('/api/config').then(r=>r.json()).then(c=>{renderSaved(c.wifi_profiles||[]);"
@@ -228,20 +277,25 @@ static const char k_index_html_v2[] =
     "radio_state.textContent='\u72b6\u6001: '+d.state+(d.current>=0?'  \u5f53\u524d: '+(d.current+1)+'/'+d.count:'');"
     "radio_list.innerHTML='';(d.stations||[]).forEach(x=>{radio_list.innerHTML+='<div class=saved><span>'+(x.index+1)+'. '+esc(x.name)+(d.playing&&x.index===d.current?' \u25b6':'')+'</span>'"
     "+'<button type=button onclick=radioPlay('+x.index+')>\u64ad\u653e</button><button type=button onclick=radioDel('+x.index+')>\u5220\u9664</button></div>'})}catch(e){}}"
-    "loadConfig();if(PAGE==='wifi')scanWifi();if(PAGE==='netradio'){loadRadio();setInterval(loadRadio,5000)}"
+    "loadConfig();if(PAGE==='identity')loadNrlServers();if(PAGE==='wifi')scanWifi();if(PAGE==='netradio'){loadRadio();setInterval(loadRadio,5000)}"
     "</script></body></html>";
 
 static const char k_servers_html[] =
     "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-    "<title>Open FMO Servers</title><style>body{font:15px sans-serif;max-width:980px;margin:auto;padding:16px;background:#111;color:#eee}"
-    "a{color:#f80}section{border:1px solid #555;margin:12px 0;padding:12px}button,select{font:inherit;padding:6px;margin:2px;background:#f80;border:0}"
-    "table{width:100%;border-collapse:collapse}th,td{padding:6px;border-bottom:1px solid #333;text-align:left}tr.sel{background:#352000}.muted{color:#999}</style></head>"
-    "<body><p><a href=/>&lt; &#37197;&#32622;</a></p><h1>NRL / FMO &#26381;&#21153;&#22120;</h1>"
-    "<section><h2>&#36816;&#34892;&#31574;&#30053;</h2><label>&#40664;&#35748;&#21457;&#36865; <select id=tx><option value=0>NRL</option><option value=1>FMO (Opus)</option></select></label> "
-    "<label>&#21516;&#26102;&#26469;&#35805; <select id=policy><option value=0>&#28151;&#38899;</option><option value=1>&#20808;&#26469;&#20248;&#20808;</option></select></label> "
-    "<button onclick=savePolicy()>&#20445;&#23384;</button></section>"
-    "<section><h2>NRL</h2><table><thead><tr><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=nrl></tbody></table></section>"
-    "<section><h2>FMO <span class=muted>(&#20027;&#23631;&#21482;&#20999;&#25442;&#25910;&#34255;&#39033;)</span></h2><label><input id=no_local type=checkbox onchange=savePolicy()> MQTT 5 No Local (&#20851;&#38381;&#21518;&#20801;&#35768;&#26412;&#26426;&#22238;&#29615;&#65292;&#20165;&#29992;&#20110;&#35843;&#35797;)</label><table><thead><tr><th>&#25910;&#34255;</th><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=fmo></tbody></table></section>"
+    "<title>FMO &#26381;&#21153;&#22120;&#19982;&#35777;&#20070;</title><style>body{font:15px sans-serif;max-width:980px;margin:auto;padding:16px;background:#111;color:#eee}"
+    "a{color:#f80}section{border:1px solid #555;margin:12px 0;padding:12px}button,select,input{font:inherit;padding:6px;margin:2px}button{background:#f80;border:0;font-weight:bold}"
+    "table{width:100%;border-collapse:collapse}th,td{padding:6px;border-bottom:1px solid #333;text-align:left}tr.sel{background:#352000}.muted{color:#999}"
+    ".server-tools{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:8px;align-items:center;margin:10px 0}.server-tools input{width:100%;box-sizing:border-box}@media(max-width:620px){.server-tools{grid-template-columns:1fr}table{font-size:13px}th,td{padding:5px}}</style></head>"
+    "<body><p><a href=/>&lt; &#37197;&#32622;</a></p><h1>FMO &#26381;&#21153;&#22120;&#19982;&#35777;&#20070;</h1>"
+    "<section><h2>FMO &#36523;&#20221;</h2><p>FMO &#21628;&#21495;&#65306;<strong id=cert_call>&#20174;&#35777;&#20070;&#35835;&#21462;</strong></p>"
+    "<p class=muted>FMO &#22522;&#30784;&#21628;&#21495;&#30001; userCert &#30830;&#23450;&#65292;&#19981;&#38656;&#35201;&#25163;&#24037;&#37197;&#32622;&#12290;</p>"
+    "<label>FMO SSID <input id=fmo_ssid type=number min=0 max=15></label> "
+    "<label><input id=no_local type=checkbox> MQTT 5 No Local</label> "
+    "<button onclick=saveFmoSettings()>&#20445;&#23384; FMO &#37197;&#32622;</button></section>"
+    "<section><h2>FMO &#26381;&#21153;&#22120; <span class=muted>(&#20027;&#23631;&#21482;&#20999;&#25442;&#25910;&#34255;&#39033;)</span></h2>"
+    "<div class=server-tools><input id=fmo_filter type=search placeholder='&#25628;&#32034;&#21517;&#31216;&#12289;&#21628;&#21495;&#12289;&#22320;&#22336;&#12289;&#31471;&#21475;&#25110; UID' oninput=renderFmo()>"
+    "<select id=fmo_sort onchange=renderFmo()><option value=default>&#40664;&#35748;&#39034;&#24207;</option><option value=favorite>&#25910;&#34255;&#20248;&#20808;</option><option value=name>&#21517;&#31216;&#25490;&#24207;</option><option value=online>&#22312;&#32447;&#20154;&#25968;</option><option value=total>&#24635;&#20154;&#25968;</option></select></div>"
+    "<p id=fmo_count class=muted></p><table><thead><tr><th>&#25910;&#34255;</th><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=fmo></tbody></table></section>"
     "<section><h2>FMO &#35777;&#20070;</h2><p class=muted>&#31169;&#38053;&#21482;&#20889;&#20837; Flash&#65292;&#19981;&#25552;&#20379;&#35835;&#22238;&#25509;&#21475;&#12290;</p><pre id=certstatus></pre>"
     "<p>userCert <input id=cu type=file accept=.json,application/json><button onclick=\"uploadCert('user',cu)\">&#19978;&#20256;</button></p>"
     "<p>intermediateCert <input id=ci type=file accept=.json,application/json><button onclick=\"uploadCert('intermediate',ci)\">&#19978;&#20256;</button></p>"
@@ -257,13 +311,14 @@ static const char k_servers_html[] =
     "<script>let data;function esc(s){let d=document.createElement('div');d.textContent=s||'';return d.innerHTML}"
     "async function post(url,obj){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(obj)});if(!r.ok)alert(await r.text());else load()}"
     "function selectServer(kind,key){post('/api/servers/select',{kind,key})}function fav(key,v){post('/api/servers/favorite',{key,favorite:v?1:0})}"
-    "function savePolicy(){post('/api/servers/config',{tx_network:tx.value,audio_policy:policy.value,no_local:no_local.checked?1:0})}"
-    "async function loadCert(){let s=await(await fetch('/api/fmo/cert',{cache:'no-store'})).json();certstatus.textContent=(s.ready?'READY ':'INCOMPLETE ')+(s.callsign||'')+(s.uid?' / '+s.uid:'')+'\\nuser='+s.user+' intermediate='+s.intermediate+' deviceKey='+s.device_key+(s.error?'\\n'+s.error:'')}"
+    "function saveFmoSettings(){post('/save',{section:'fmo_identity',fmo_callsign_ssid:fmo_ssid.value,fmo_mqtt_no_local:no_local.checked?1:0})}"
+    "async function loadCert(){let s=await(await fetch('/api/fmo/cert',{cache:'no-store'})).json();cert_call.textContent=s.callsign||(s.ready?'--':'\u7b49\u5f85\u5b8c\u6574\u8bc1\u4e66');certstatus.textContent=(s.ready?'READY ':'INCOMPLETE ')+(s.callsign||'')+(s.uid?' / '+s.uid:'')+'\\nuser='+s.user+' intermediate='+s.intermediate+' deviceKey='+s.device_key+(s.error?'\\n'+s.error:'')}"
     "async function uploadCert(kind,input){if(!input.files.length)return;let r=await fetch('/api/fmo/cert/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:input.files[0]});if(!r.ok)alert(await r.text());await loadCert()}"
-    "async function load(){data=await(await fetch('/api/servers',{cache:'no-store'})).json();tx.value=data.tx_network;policy.value=data.audio_policy;no_local.checked=!!data.no_local;"
+    "function renderFmo(){if(!data)return;let q=fmo_filter.value.trim().toLowerCase(),list=(data.fmo||[]).filter(x=>!q||[x.name,x.callsign,x.host,x.port,x.uid].join(' ').toLowerCase().includes(q));let mode=fmo_sort.value;if(mode==='favorite')list.sort((a,b)=>(b.favorite-a.favorite)||(b.selected-a.selected));else if(mode==='name')list.sort((a,b)=>a.name.localeCompare(b.name));else if(mode==='online')list.sort((a,b)=>(b.online-a.online)||(b.total-a.total));else if(mode==='total')list.sort((a,b)=>(b.total-a.total)||(b.online-a.online));fmo_count.textContent='\u663e\u793a '+list.length+' / '+(data.fmo||[]).length+' \u4e2a\u670d\u52a1\u5668';fmo.innerHTML='';"
     "function cell(r,t){let c=r.insertCell();c.textContent=t;return c}function button(c,t,fn){let b=document.createElement('button');b.textContent=t;b.onclick=fn;c.appendChild(b)}"
-    "nrl.innerHTML='';data.nrl.forEach(x=>{let r=nrl.insertRow();r.className=x.selected?'sel':'';cell(r,x.name);cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);button(r.insertCell(),'\u9009\u62e9',()=>selectServer('nrl',x.key))});"
-    "fmo.innerHTML='';data.fmo.forEach(x=>{let r=fmo.insertRow();r.className=x.selected?'sel':'';let c=r.insertCell(),q=document.createElement('input');q.type='checkbox';q.checked=x.favorite;q.onchange=()=>fav(x.key,q.checked);c.appendChild(q);let cs=x.callsign+(x.has_ssid?'-'+x.ssid:'');cell(r,x.name+' / '+cs+(x.uid?' / '+x.uid:''));cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);button(r.insertCell(),'\u9009\u62e9',()=>selectServer('fmo',x.key))})}"
+    "list.forEach(x=>{let r=fmo.insertRow();r.className=x.selected?'sel':'';let c=r.insertCell(),favbox=document.createElement('input');favbox.type='checkbox';favbox.checked=x.favorite;favbox.onchange=()=>fav(x.key,favbox.checked);c.appendChild(favbox);let cs=x.callsign+(x.has_ssid?'-'+x.ssid:'');cell(r,x.name+' / '+cs+(x.uid?' / '+x.uid:''));cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);let bc=r.insertCell();button(bc,x.selected?'\u5f53\u524d':'\u9009\u62e9',()=>selectServer('fmo',x.key));if(x.selected)bc.firstChild.disabled=true});if(!list.length)fmo.innerHTML='<tr><td colspan=5 class=muted>\u6ca1\u6709\u5339\u914d\u7684\u670d\u52a1\u5668</td></tr>'}"
+    "async function load(){let a=await Promise.all([fetch('/api/servers',{cache:'no-store'}),fetch('/api/config',{cache:'no-store'})]);data=await a[0].json();let cfg=await a[1].json();fmo_ssid.value=cfg.fmo_callsign_ssid;no_local.checked=!!data.no_local;"
+    "renderFmo()}"
     "async function qsoPost(url,obj){let r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(obj)});if(!r.ok)alert(await r.text());await loadQso()}"
     "function qsoCall(){qsoPost('/api/qso/call',{peer:qso_peer.value,uid:qso_uid.value||0})}"
     "function qsoCancel(){qsoPost('/api/qso/cancel',{})}"
@@ -356,11 +411,16 @@ static esp_err_t index_get(httpd_req_t *request)
 
 static esp_err_t config_page_get(httpd_req_t *request)
 {
+    if (strcmp(request->uri, "/config/fmo-identity") == 0) {
+        httpd_resp_set_status(request, "302 Found");
+        httpd_resp_set_hdr(request, "Location", "/servers");
+        return httpd_resp_sendstr(request, "FMO settings moved");
+    }
     static const char *const pages[] = {
         "/config/identity",
-        "/config/fmo-identity",
         "/config/wifi",
         "/config/radio",
+        "/config/audio",
         "/config/aprs",
         "/config/netradio",
     };
@@ -376,8 +436,40 @@ static esp_err_t config_page_get(httpd_req_t *request)
                                    "configuration page not found");
     }
     httpd_resp_set_type(request, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    if (strcmp(request->uri, "/config/wifi") == 0) {
+        ESP_LOGI(TAG, "serve provisioning page");
+        return httpd_resp_send(request, k_wifi_html, HTTPD_RESP_USE_STRLEN);
+    }
     return httpd_resp_send(request, k_index_html_v2,
                            HTTPD_RESP_USE_STRLEN);
+}
+
+static esp_err_t wifi_get(httpd_req_t *request)
+{
+    fmo_config_t config;
+    ESP_RETURN_ON_ERROR(config_store_load(&config), TAG, "load Wi-Fi config");
+    httpd_resp_set_type(request, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "{\"profiles\":[", 13),
+                        TAG, "send Wi-Fi JSON");
+    const size_t count = config_store_wifi_count(&config);
+    for (size_t i = 0; i < count; ++i) {
+        char escaped[96];
+        char item[144];
+        json_escape(escaped, sizeof(escaped), config.wifi_profiles[i].ssid);
+        int length = snprintf(item, sizeof(item),
+                              "%s{\"index\":%u,\"ssid\":\"%s\"}",
+                              i == 0 ? "" : ",", (unsigned)i, escaped);
+        if (length < 0 || length >= (int)sizeof(item)) {
+            return ESP_FAIL;
+        }
+        ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, item, length), TAG,
+                            "send Wi-Fi profile");
+    }
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "]}", 2), TAG,
+                        "finish Wi-Fi JSON");
+    return httpd_resp_send_chunk(request, NULL, 0);
 }
 
 static esp_err_t update_get(httpd_req_t *request)
@@ -427,7 +519,8 @@ static esp_err_t config_get(httpd_req_t *request)
              "\"voice_codec\":%u,\"rx_volume\":%u,\"tx_volume\":%u,"
                           "\"es8311_dac_vol\":%u,\"es8311_adc_vol\":%u,"
                           "\"es8311_hp_drive\":%s,\"mic_gain\":%u,"
-                          "\"freq_tune\":%d,"
+                          "\"freq_tune\":%d,\"tx_network\":%u,"
+                          "\"audio_policy\":%u,\"fmo_mqtt_no_local\":%s,"
              "\"aprs_enabled\":%s,\"aprs_position_set\":%s,\"aprs_ssid\":%u,"
              "\"aprs_latitude\":%.6f,\"aprs_longitude\":%.6f,\"aprs_interval\":%u,"
              "\"aprs_host\":\"%s\",\"aprs_port\":%u,\"aprs_comment\":\"%s\","
@@ -458,6 +551,8 @@ static esp_err_t config_get(httpd_req_t *request)
              config.es8311_hp_drive ? "true" : "false",
                           (unsigned)config.mic_gain,
              (int)config.freq_tune_hz,
+             (unsigned)config.tx_network, (unsigned)config.audio_policy,
+             config.fmo_mqtt_no_local ? "true" : "false",
              config.aprs_enabled ? "true" : "false",
              config.aprs_position_set ? "true" : "false",
              (unsigned)config.aprs_ssid,
@@ -566,6 +661,7 @@ static esp_err_t save_post(httpd_req_t *request)
     bool save_fmo_identity = false;
     bool save_wifi = false;
     bool save_radio = false;
+    bool save_audio = false;
     bool save_aprs = false;
 
     if (!form_value(body, "section", section, sizeof(section))) {
@@ -575,13 +671,16 @@ static esp_err_t save_post(httpd_req_t *request)
         location = "/config/identity";
     } else if (strcmp(section, "fmo_identity") == 0) {
         save_fmo_identity = true;
-        location = "/config/fmo-identity";
+        location = "/servers";
     } else if (strcmp(section, "wifi") == 0) {
         save_wifi = true;
         location = "/config/wifi";
     } else if (strcmp(section, "radio") == 0) {
         save_radio = true;
         location = "/config/radio";
+    } else if (strcmp(section, "audio") == 0) {
+        save_audio = true;
+        location = "/config/audio";
     } else if (strcmp(section, "aprs") == 0) {
         save_aprs = true;
         location = "/config/aprs";
@@ -617,35 +716,16 @@ static esp_err_t save_post(httpd_req_t *request)
         }
     } else if (save_fmo_identity) {
         unsigned long number;
-        if (!form_value(body, "fmo_callsign", value, sizeof(value)) ||
-            !value[0]) {
-            error = "FMO callsign required";
-        } else {
-            const size_t length = strlen(value);
-            if (length > 6) {
-                error = "FMO callsign maximum is 6 characters";
-            } else {
-                for (size_t i = 0; i < length; ++i) {
-                    if (!isalnum((unsigned char)value[i])) {
-                        error = "FMO callsign must be letters and digits";
-                        break;
-                    }
-                    value[i] = (char)toupper((unsigned char)value[i]);
-                }
-            }
-            if (!error) {
-                strlcpy(config.fmo_callsign, value,
-                        sizeof(config.fmo_callsign));
-            }
-        }
-        if (!error && form_value(body, "fmo_callsign_ssid", value,
+        if (form_value(body, "fmo_callsign_ssid", value,
                                  sizeof(value))) {
             number = strtoul(value, NULL, 10);
             if (number > 15) error = "FMO SSID range is 0-15";
             else config.fmo_callsign_ssid = (uint8_t)number;
-        } else if (!error) {
+        } else {
             error = "FMO SSID required";
         }
+        config.fmo_mqtt_no_local =
+            strstr(body, "fmo_mqtt_no_local=1") != NULL;
     } else if (save_wifi) {
         char ssid[33] = {0};
         char password[65] = {0};
@@ -687,11 +767,6 @@ static esp_err_t save_post(httpd_req_t *request)
             else config.tx_power = (uint8_t)number;
         }
         config.rf_enabled = strstr(body, "rf_enabled=1") != NULL;
-        if (!error && form_value(body, "voice_codec", value, sizeof(value))) {
-            number = strtoul(value, NULL, 10);
-            if (number > 1) error = "voice_codec must be 0 or 1";
-            else config.voice_codec = (uint8_t)number;
-        }
         if (!error && form_value(body, "rx_volume", value, sizeof(value))) {
             number = strtoul(value, NULL, 10);
             if (number > 10) error = "rx_volume range is 0-10";
@@ -701,6 +776,20 @@ static esp_err_t save_post(httpd_req_t *request)
             number = strtoul(value, NULL, 10);
             if (number > 10) error = "tx_volume range is 0-10";
             else config.tx_volume = (uint8_t)number;
+        }
+        if (!error && form_value(body, "freq_tune", value, sizeof(value))) {
+            long ft = strtol(value, NULL, 10);
+            if (ft < -5000 || ft > 5000) error = "freq_tune range is -5000~5000";
+            else config.freq_tune_hz = (int16_t)ft;
+        }
+    } else if (save_audio) {
+        unsigned long number;
+        if (form_value(body, "voice_codec", value, sizeof(value))) {
+            number = strtoul(value, NULL, 10);
+            if (number > 1) error = "voice_codec must be 0 or 1";
+            else config.voice_codec = (uint8_t)number;
+        } else {
+            error = "voice_codec required";
         }
         if (!error && form_value(body, "es8311_dac_vol", value, sizeof(value))) {
             number = strtoul(value, NULL, 10);
@@ -719,10 +808,15 @@ static esp_err_t save_post(httpd_req_t *request)
             if (number < FMO_MIC_GAIN_MIN || number > FMO_MIC_GAIN_MAX) error = "mic_gain range is 1-5";
             else config.mic_gain = (uint8_t)number;
         }
-        if (!error && form_value(body, "freq_tune", value, sizeof(value))) {
-            long ft = strtol(value, NULL, 10);
-            if (ft < -5000 || ft > 5000) error = "freq_tune range is -5000~5000";
-            else config.freq_tune_hz = (int16_t)ft;
+        if (!error && form_value(body, "tx_network", value, sizeof(value))) {
+            number = strtoul(value, NULL, 10);
+            if (number > 1) error = "tx_network must be 0 or 1";
+            else config.tx_network = (uint8_t)number;
+        }
+        if (!error && form_value(body, "audio_policy", value, sizeof(value))) {
+            number = strtoul(value, NULL, 10);
+            if (number > 1) error = "audio_policy must be 0 or 1";
+            else config.audio_policy = (uint8_t)number;
         }
     } else if (save_aprs) {
         unsigned long number;
@@ -916,6 +1010,8 @@ static esp_err_t save_post(httpd_req_t *request)
         fmo_discovery_update_config(&config);
         fmo_link_update_config(&config);
         fmo_qso_update_config(&config);
+        aprs_service_update_config(&config);
+        fmo_station_beacon_update_config(&config);
     } else if (save_wifi) {
         (void)network_manager_update_profiles(&config, true);
     } else if (save_radio) {
@@ -925,14 +1021,17 @@ static esp_err_t save_post(httpd_req_t *request)
         (void)radio_at_set_squelch(config.squelch);
         (void)radio_at_set_tx_power(config.tx_power);
         (void)radio_at_set_rf_enabled(config.rf_enabled);
-        audio_passthrough_set_voice_codec(config.voice_codec);
         (void)radio_at_set_volume(false, config.rx_volume);
         (void)radio_at_set_volume(true, config.tx_volume);
+        (void)radio_at_set_freq_tune(config.freq_tune_hz);
+    } else if (save_audio) {
+        audio_passthrough_set_voice_codec(config.voice_codec);
         (void)es8311_codec_set_dac_volume(config.es8311_dac_vol);
         (void)es8311_codec_set_adc_volume(config.es8311_adc_vol);
         (void)es8311_codec_set_headphone_drive(config.es8311_hp_drive);
         audio_passthrough_set_mic_gain(config.mic_gain);
-        (void)radio_at_set_freq_tune(config.freq_tune_hz);
+        audio_passthrough_set_audio_policy(config.audio_policy);
+        audio_passthrough_set_tx_network(config.tx_network);
     } else if (save_aprs) {
         aprs_service_update_config(&config);
         fmo_station_beacon_update_config(&config);
@@ -1293,6 +1392,27 @@ static char *receive_json(httpd_req_t *request, size_t max_size,
     return body;
 }
 
+static void sync_fmo_callsign_from_certificate(void)
+{
+    fmo_identity_status_t identity = {0};
+    if (fmo_cert_store_status(&identity) != ESP_OK || !identity.ready ||
+        identity.callsign[0] == '\0') return;
+
+    fmo_config_t config;
+    if (config_store_load(&config) != ESP_OK ||
+        strcmp(config.fmo_callsign, identity.callsign) == 0) return;
+    strlcpy(config.fmo_callsign, identity.callsign,
+            sizeof(config.fmo_callsign));
+    if (config_store_save(&config) != ESP_OK) return;
+    ESP_LOGI(TAG, "FMO callsign synchronized from certificate: %s",
+             config.fmo_callsign);
+    fmo_discovery_update_config(&config);
+    fmo_link_update_config(&config);
+    fmo_qso_update_config(&config);
+    aprs_service_update_config(&config);
+    fmo_station_beacon_update_config(&config);
+}
+
 static esp_err_t fmo_cert_get(httpd_req_t *request)
 {
     fmo_identity_status_t status;
@@ -1341,6 +1461,7 @@ static esp_err_t fmo_cert_post(httpd_req_t *request)
                                    message[0] != '\0' ? message :
                                    esp_err_to_name(error));
     }
+    sync_fmo_callsign_from_certificate();
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
@@ -1357,7 +1478,9 @@ static esp_err_t wifi_scan_get(httpd_req_t *request)
     uint16_t count = 24;
     wifi_ap_record_t *records = calloc(count, sizeof(*records));
     if (records == NULL) return httpd_resp_send_500(request);
-    esp_err_t error = network_manager_scan_records(records, &count);
+    esp_err_t error = request->user_ctx != NULL
+        ? network_manager_cached_scan_records(records, &count)
+        : network_manager_scan_records(records, &count);
     if (error != ESP_OK) {
         free(records);
         return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -1672,18 +1795,30 @@ static esp_err_t captive_404_handler(httpd_req_t *req, httpd_err_code_t err)
 {
     (void)err;
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_set_hdr(req, "Location", "/config/wifi");
     httpd_resp_send(req, "Redirect to captive portal", HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
 }
 
+static esp_err_t captive_probe_get(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "/config/wifi");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, "Open Wi-Fi setup", HTTPD_RESP_USE_STRLEN);
+}
+
 esp_err_t web_portal_start(void)
 {
+    sync_fmo_callsign_from_certificate();
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 24;
+    /* Keep headroom for new API routes; the portal currently registers 28. */
+    config.max_uri_handlers = 32;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.recv_wait_timeout = 30;
-    config.stack_size = 8192;
+    /* Captive-portal probes can arrive while configuration handlers are
+     * active; 8 KB overflowed in the HTTP server task on ESP-IDF 6.2. */
+    config.stack_size = 12288;
     /* lwIP only allows 16 sockets system-wide; keep-alive stops the page's
      * status polling from churning sockets into TIME_WAIT, and lru_purge
      * recycles idle connections instead of rejecting new ones. */
@@ -1701,10 +1836,13 @@ esp_err_t web_portal_start(void)
     const httpd_uri_t routes[] = {
         {.uri = "/", .method = HTTP_GET, .handler = index_get},
         {.uri = "/config/*", .method = HTTP_GET, .handler = config_page_get},
+        {.uri = "/api/wifi", .method = HTTP_GET, .handler = wifi_get},
         {.uri = "/api/config", .method = HTTP_GET, .handler = config_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/save", .method = HTTP_POST, .handler = save_post},
         {.uri = "/scan", .method = HTTP_GET, .handler = wifi_scan_get},
+        {.uri = "/scan/cached", .method = HTTP_GET, .handler = wifi_scan_get,
+         .user_ctx = (void *)1},
         {.uri = "/wifi/delete", .method = HTTP_POST, .handler = wifi_delete_post},
         {.uri = "/api/radio", .method = HTTP_GET, .handler = radio_get},
         {.uri = "/api/radio", .method = HTTP_POST, .handler = radio_post},
@@ -1731,6 +1869,9 @@ esp_err_t web_portal_start(void)
         {.uri = "/ota/config", .method = HTTP_POST, .handler = ota_config_post},
         {.uri = "/ota/check", .method = HTTP_POST, .handler = ota_check_post},
         {.uri = "/ota/install", .method = HTTP_POST, .handler = ota_install_post},
+        /* Keep this last: it catches Android/iOS/Windows captive-portal probes
+         * (for example /generate_204 and /hotspot-detect.html). */
+        {.uri = "/*", .method = HTTP_GET, .handler = captive_probe_get},
     };
     for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); ++i) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &routes[i]), TAG,

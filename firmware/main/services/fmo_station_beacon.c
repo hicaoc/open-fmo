@@ -55,9 +55,10 @@ static uint32_t s_last_tx_ms;
 static char s_gate[64] = "未启用";
 static char s_host[64];
 static uint16_t s_port;
-/* Task stack lives in PSRAM (same rationale as aprs_service). */
+/* This task reads/writes NVS.  Its stack must stay in internal RAM because
+ * flash operations temporarily disable the PSRAM cache on ESP32-S3. */
 static StaticTask_t s_task_tcb;
-static EXT_RAM_BSS_ATTR StackType_t s_task_stack[8192 / sizeof(StackType_t)];
+static StackType_t s_task_stack[8192 / sizeof(StackType_t)];
 /* Large work buffers are module-static so the task stack stays small; only
  * the beacon task touches them. */
 static uint8_t s_cert_blob[512];

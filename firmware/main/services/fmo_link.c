@@ -368,7 +368,10 @@ static esp_err_t start_client(const fmo_server_t *server)
         .network.reconnect_timeout_ms = 10000,
         .network.timeout_ms = 10000,
         .network.disable_auto_reconnect = true,
-        .task.stack_size = 8192,
+        /* Incoming voice runs Opus/SILK decode + a 960-sample PCM buffer on
+         * the mqtt_task stack (MQTT_DATA -> process_raw -> decode_block);
+         * 6144 overflowed in silk_decode_core. */
+        .task.stack_size = 10240,
         .buffer.size = RAW_MAX_SIZE,
         .buffer.out_size = RAW_MAX_SIZE,
         .outbox.limit = 16U * 1024U,
@@ -471,7 +474,12 @@ esp_err_t fmo_link_start(const fmo_config_t *config)
         s_raw = NULL;
         return ESP_ERR_NOT_SUPPORTED;
     }
-    return xTaskCreate(control_task, "fmo_link", 8192, NULL, 4, &s_task) ==
+    /* This task reads certificates from SPIFFS, so its stack must stay in
+     * internal RAM while the flash cache is disabled.  Credential generation
+     * (cJSON + libsodium Ed25519) overflowed 8 KB on the ESP-IDF 6.2
+     * toolchain (observed as a stack overflow in fe25519_sq/fe25519_sq2),
+     * so reserve 16 KB like nrl_link. */
+    return xTaskCreate(control_task, "fmo_link", 16384, NULL, 4, &s_task) ==
         pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

@@ -1043,7 +1043,7 @@ static bool self_test(void)
     char body[256];
     if (!build_message_body("BG8LLD", "QTHQRY,Q3187,U2533", "2", body,
                             sizeof(body)) ||
-        strcmp(body, ":BG8LLD    :QTHQRY,Q3187,U2533{2") != 0) {
+        strcmp(body, ":BG8LLD   :QTHQRY,Q3187,U2533{2") != 0) {
         return false;
     }
     /* Field parsing incl. msgId-echo vectors from the Rust reference. */
@@ -1060,7 +1060,7 @@ static bool self_test(void)
         strcmp(name, "\xe6\xb2\xb3\xe5\x8c\x97\xe6\x9f\x90\xe5\x9c\xb0") != 0) {
         return false;
     }
-    strlcpy(buf, "Q796,U2533,S2579,\xe6\xb5\x8b\xe8\xaf\x95\xe5\x8f\xb0", sizeof(buf));
+    strlcpy(buf, "CALL,Q796,U2533,S2579,\xe6\xb5\x8b\xe8\xaf\x95\xe5\x8f\xb0", sizeof(buf));
     count = split_fields(buf, verb, sizeof(verb), fields);
     parse_fields(fields, count, &q, &u, &s, name, sizeof(name));
     if (q != 796 || u != 2533 || s != 2579 ||

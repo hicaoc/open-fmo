@@ -42,6 +42,29 @@ static uint32_t s_cfg_gen = UINT32_MAX;
 /* Selected station on the net-radio detail page (not the playing one) */
 static int s_net_radio_sel = -1;
 
+#define MENU_SERVERS   APP_UI_MENU_SERVERS
+#define MENU_RADIO     APP_UI_MENU_RADIO
+#define MENU_AUDIO     APP_UI_MENU_AUDIO
+#define MENU_APRS      APP_UI_MENU_APRS
+#define MENU_ESPNOW    APP_UI_MENU_ESPNOW
+#define MENU_NET_RADIO APP_UI_MENU_NET_RADIO
+#define MENU_OTA       APP_UI_MENU_OTA
+#define MENU_LANGUAGE  APP_UI_MENU_LANGUAGE
+
+enum {
+    EDIT_DIRTY_RF    = 1u << 0,
+    EDIT_DIRTY_AUDIO = 1u << 1,
+    EDIT_DIRTY_APRS  = 1u << 2,
+};
+
+#define UI_CONFIG_SAVE_DELAY_US 2000000
+
+static fmo_config_t s_edit_cfg;
+static uint32_t s_edit_dirty;
+static int64_t s_edit_changed_at_us;
+static int64_t s_edit_saved_until_us;
+static bool s_edit_save_failed;
+
 static const fmo_config_t *cfg_get(void)
 {
     uint32_t gen = config_store_generation();
@@ -51,17 +74,86 @@ static const fmo_config_t *cfg_get(void)
     }
     return &s_cfg_cache;
 }
+
+static fmo_config_t *edit_cfg(uint32_t dirty_group)
+{
+    if (s_edit_dirty == 0) {
+        if (config_store_load(&s_edit_cfg) != ESP_OK) {
+            config_store_defaults(&s_edit_cfg);
+        }
+    }
+    s_edit_dirty |= dirty_group;
+    s_edit_changed_at_us = esp_timer_get_time();
+    s_edit_save_failed = false;
+    return &s_edit_cfg;
+}
+
+static const fmo_config_t *cfg_view(void)
+{
+    return s_edit_dirty != 0 ? &s_edit_cfg : cfg_get();
+}
+
+bool app_ui_poll(void)
+{
+    if (s_edit_dirty == 0 ||
+        esp_timer_get_time() - s_edit_changed_at_us < UI_CONFIG_SAVE_DELAY_US) {
+        return false;
+    }
+
+    fmo_config_t fresh;
+    esp_err_t error = config_store_load(&fresh);
+    if (error == ESP_OK) {
+        if (s_edit_dirty & EDIT_DIRTY_RF) {
+            fresh.rf_enabled = s_edit_cfg.rf_enabled;
+            fresh.radio_rx_mhz = s_edit_cfg.radio_rx_mhz;
+            fresh.radio_tx_mhz = s_edit_cfg.radio_tx_mhz;
+            fresh.rx_ctcss_hz = s_edit_cfg.rx_ctcss_hz;
+            fresh.tx_ctcss_hz = s_edit_cfg.tx_ctcss_hz;
+            fresh.squelch = s_edit_cfg.squelch;
+            fresh.tx_power = s_edit_cfg.tx_power;
+            fresh.rx_volume = s_edit_cfg.rx_volume;
+            fresh.tx_volume = s_edit_cfg.tx_volume;
+            fresh.freq_tune_hz = s_edit_cfg.freq_tune_hz;
+        }
+        if (s_edit_dirty & EDIT_DIRTY_AUDIO) {
+            fresh.tx_network = s_edit_cfg.tx_network;
+            fresh.voice_codec = s_edit_cfg.voice_codec;
+            fresh.audio_policy = s_edit_cfg.audio_policy;
+            fresh.es8311_dac_vol = s_edit_cfg.es8311_dac_vol;
+            fresh.es8311_adc_vol = s_edit_cfg.es8311_adc_vol;
+            fresh.es8311_hp_drive = s_edit_cfg.es8311_hp_drive;
+            fresh.mic_gain = s_edit_cfg.mic_gain;
+        }
+        if (s_edit_dirty & EDIT_DIRTY_APRS) {
+            fresh.aprs_rf_rx = s_edit_cfg.aprs_rf_rx;
+            fresh.aprs_rf_tx = s_edit_cfg.aprs_rf_tx;
+            fresh.aprs_nrl_rx = s_edit_cfg.aprs_nrl_rx;
+            fresh.aprs_nrl_tx = s_edit_cfg.aprs_nrl_tx;
+            fresh.aprs_fwd = s_edit_cfg.aprs_fwd;
+        }
+        error = config_store_save(&fresh);
+    }
+
+    if (error == ESP_OK) {
+        s_edit_dirty = 0;
+        s_edit_saved_until_us = esp_timer_get_time() + 2000000;
+        s_edit_save_failed = false;
+    } else {
+        s_edit_changed_at_us = esp_timer_get_time();
+        s_edit_save_failed = true;
+    }
+    return true;
+}
 #define COLOR_PURPLE 0xA01F
 
 static const char *k_menu_en[] = {
-    "Servers", "Radio", "CTCSS", "APRS",
-    "Network", "Audio", "System OTA", "Language", "Net Radio"
+    "Servers", "RF Board", "Audio", "APRS",
+    "ESP-NOW", "Net Radio", "System OTA", "Language"
 };
 static const char *k_menu_zh[] = {
-    "\u670d\u52a1\u5668\u5217\u8868", "\u5c04\u9891\u8bbe\u7f6e",
-    "\u4e9a\u97f3\u8bbe\u7f6e", "APRS\u8bbe\u7f6e",
-    "\u7f51\u7edc\u8bbe\u7f6e", "\u97f3\u9891\u8bbe\u7f6e",
-    "\u7cfb\u7edf\u5347\u7ea7", "\u8bed\u8a00", "\u7f51\u7edc\u7535\u53f0"
+    "\u670d\u52a1\u5668", "\u5c04\u9891\u677f", "\u97f3\u9891",
+    "APRS", "ESP-NOW", "\u7f51\u7edc\u7535\u53f0",
+    "\u7cfb\u7edf\u5347\u7ea7", "\u8bed\u8a00"
 };
 static const int k_menu_count = sizeof(k_menu_en) / sizeof(k_menu_en[0]);
 
@@ -110,16 +202,6 @@ static void change_fmo_favorite(app_ui_t *ui, int direction)
     ui->server_preview_until_us = esp_timer_get_time() + 3000000;
 }
 
-static void change_fmo_directory(app_ui_t *ui, int direction)
-{
-    const int count = (int)fmo_server_directory_count();
-    if (count <= 0) return;
-    int next = (int)ui->fmo_server_index + direction;
-    if (next < 0) next = count - 1;
-    if (next >= count) next = 0;
-    ui->fmo_server_index = (size_t)next;
-}
-
 /* While the net radio is playing, the knob switches stations instead of
  * servers (the preview list shows stations, see render_main). */
 static void change_station(app_ui_t *ui, int direction)
@@ -164,10 +246,9 @@ void app_ui_handle(app_ui_t *ui, encoder_event_type_t event)
     if (ui == NULL) return;
     if (event == ENCODER_EVENT_LONG_PRESS) {
         if (ui->page == APP_UI_DETAIL) {
-            /* Leaving the net radio page stops playback */
-            if (ui->menu_index == 8) net_radio_stop();
             ui->page = APP_UI_MENU;
             ui->server_select_mode = 0;
+            ui->ota_install_confirm = false;
         }
         else if (ui->page == APP_UI_MENU) ui->page = APP_UI_MAIN;
         /* Main page: long press stops net radio playback */
@@ -203,152 +284,173 @@ void app_ui_handle(app_ui_t *ui, encoder_event_type_t event)
             if (ui->menu_index >= k_menu_count) ui->menu_index = 0;
         } else if (event == ENCODER_EVENT_PRESS) {
             ui->page = APP_UI_DETAIL;
-            if (ui->menu_index == 0) ui->server_select_mode = 0;
+            if (ui->menu_index == MENU_SERVERS) ui->server_select_mode = 1;
+            if (ui->menu_index == MENU_OTA) ui->ota_install_confirm = false;
         }
     } else if (ui->page == APP_UI_DETAIL) {
-        if (ui->menu_index == 0) {
+        if (ui->menu_index == MENU_SERVERS) {
             if (direction != 0) {
-                if (ui->server_select_mode == 0) {
-                    ui->server_select_mode = direction < 0 ? 2 : 1;
-                }
                 if (ui->server_select_mode == 2) {
-                    change_fmo_directory(ui, direction);
+                    change_fmo_favorite(ui, direction);
                 } else {
                     change_server(ui, direction);
                 }
-            } else if (event == ENCODER_EVENT_PRESS &&
-                       ui->server_select_mode == 2) {
-                const fmo_server_t *server =
-                    fmo_server_directory_get(ui->fmo_server_index);
-                if (server != NULL) {
-                    (void)fmo_server_directory_set_favorite(
-                        server->key, !server->favorite);
-                }
+            } else if (event == ENCODER_EVENT_PRESS) {
+                ui->server_select_mode = ui->server_select_mode == 2 ? 1 : 2;
             }
-        } else if (ui->menu_index == 1) {
-            /* Radio detail: rotate adjusts current field, press switches field */
-            fmo_config_t cfg;
-            config_store_load(&cfg);
+        } else if (ui->menu_index == MENU_RADIO) {
+            /* RF board: enable first, followed by frequency, CTCSS, radio
+             * audio and calibration.  Runtime changes apply immediately;
+             * NVS persistence is debounced by app_ui_poll(). */
             if (event == ENCODER_EVENT_PRESS) {
-                ui->radio_adjust_field = (ui->radio_adjust_field + 1) % 5;
+                ui->radio_adjust_field = (ui->radio_adjust_field + 1) % 10;
             } else if (direction != 0) {
+                fmo_config_t *cfg = edit_cfg(EDIT_DIRTY_RF);
                 switch (ui->radio_adjust_field) {
-                case 0: /* RX freq */
-                    cfg.radio_rx_mhz += direction * 0.005f;
-                    if (cfg.radio_rx_mhz < 1.0f) cfg.radio_rx_mhz = 1.0f;
-                    if (cfg.radio_rx_mhz > 1300.0f) cfg.radio_rx_mhz = 1300.0f;
-                    ui->rx_mhz = cfg.radio_rx_mhz;
-                    radio_at_set_frequency(false, cfg.radio_rx_mhz);
+                case 0: /* RF enable */
+                    cfg->rf_enabled = !cfg->rf_enabled;
+                    radio_at_set_rf_enabled(cfg->rf_enabled);
                     break;
-                case 1: /* TX freq */
-                    cfg.radio_tx_mhz += direction * 0.005f;
-                    if (cfg.radio_tx_mhz < 1.0f) cfg.radio_tx_mhz = 1.0f;
-                    if (cfg.radio_tx_mhz > 1300.0f) cfg.radio_tx_mhz = 1300.0f;
-                    ui->tx_mhz = cfg.radio_tx_mhz;
-                    radio_at_set_frequency(true, cfg.radio_tx_mhz);
+                case 1: /* RX frequency */
+                    cfg->radio_rx_mhz += direction * 0.005f;
+                    if (cfg->radio_rx_mhz < 1.0f) cfg->radio_rx_mhz = 1.0f;
+                    if (cfg->radio_rx_mhz > 1300.0f) cfg->radio_rx_mhz = 1300.0f;
+                    ui->rx_mhz = cfg->radio_rx_mhz;
+                    radio_at_set_frequency(false, cfg->radio_rx_mhz);
                     break;
-                case 2: /* SQL */
+                case 2: /* TX frequency */
+                    cfg->radio_tx_mhz += direction * 0.005f;
+                    if (cfg->radio_tx_mhz < 1.0f) cfg->radio_tx_mhz = 1.0f;
+                    if (cfg->radio_tx_mhz > 1300.0f) cfg->radio_tx_mhz = 1300.0f;
+                    ui->tx_mhz = cfg->radio_tx_mhz;
+                    radio_at_set_frequency(true, cfg->radio_tx_mhz);
+                    break;
+                case 3: /* RX CTCSS */
                 {
-                    int sql = (int)cfg.squelch + direction;
+                    int idx = ctcss_find_index(cfg->rx_ctcss_hz) + direction;
+                    if (idx < 0) idx = 0;
+                    if (idx >= (int)UI_CTCSS_COUNT) idx = (int)UI_CTCSS_COUNT - 1;
+                    cfg->rx_ctcss_hz = k_ctcss_tones[idx];
+                    ui->rx_ctcss_hz = cfg->rx_ctcss_hz;
+                    nrl_audio_codec_configure_ctcss(cfg->rx_ctcss_hz,
+                                                    cfg->tx_ctcss_hz);
+                    break;
+                }
+                case 4: /* TX CTCSS */
+                {
+                    int idx = ctcss_find_index(cfg->tx_ctcss_hz) + direction;
+                    if (idx < 0) idx = 0;
+                    if (idx >= (int)UI_CTCSS_COUNT) idx = (int)UI_CTCSS_COUNT - 1;
+                    cfg->tx_ctcss_hz = k_ctcss_tones[idx];
+                    ui->tx_ctcss_hz = cfg->tx_ctcss_hz;
+                    nrl_audio_codec_configure_ctcss(cfg->rx_ctcss_hz,
+                                                    cfg->tx_ctcss_hz);
+                    break;
+                }
+                case 5: /* squelch */
+                {
+                    int sql = (int)cfg->squelch + direction;
                     if (sql < 0) sql = 0;
                     if (sql > 10) sql = 10;
-                    cfg.squelch = (uint8_t)sql;
-                    radio_at_set_squelch(cfg.squelch);
+                    cfg->squelch = (uint8_t)sql;
+                    radio_at_set_squelch(cfg->squelch);
                     break;
                 }
-                case 3: /* PWR */
+                case 6: /* TX power */
                 {
-                    int pwr = (int)cfg.tx_power + direction;
+                    int pwr = (int)cfg->tx_power + direction;
                     if (pwr < 0) pwr = 0;
                     if (pwr > 2) pwr = 2;
-                    cfg.tx_power = (uint8_t)pwr;
-                    radio_at_set_tx_power(cfg.tx_power);
+                    cfg->tx_power = (uint8_t)pwr;
+                    radio_at_set_tx_power(cfg->tx_power);
                     break;
                 }
-                case 4: /* RF enable */
-                    cfg.rf_enabled = !cfg.rf_enabled;
-                    radio_at_set_rf_enabled(cfg.rf_enabled);
+                case 7: /* radio RX volume */
+                {
+                    int volume = (int)cfg->rx_volume + direction;
+                    if (volume < 0) volume = 0;
+                    if (volume > 10) volume = 10;
+                    cfg->rx_volume = (uint8_t)volume;
+                    radio_at_set_volume(false, cfg->rx_volume);
                     break;
                 }
-                config_store_save(&cfg);
+                case 8: /* radio TX volume */
+                {
+                    int volume = (int)cfg->tx_volume + direction;
+                    if (volume < 0) volume = 0;
+                    if (volume > 10) volume = 10;
+                    cfg->tx_volume = (uint8_t)volume;
+                    radio_at_set_volume(true, cfg->tx_volume);
+                    break;
+                }
+                case 9: /* RF carrier offset */
+                {
+                    int tune = (int)cfg->freq_tune_hz + direction * 10;
+                    if (tune < -5000) tune = -5000;
+                    if (tune > 5000) tune = 5000;
+                    cfg->freq_tune_hz = (int16_t)tune;
+                    radio_at_set_freq_tune(cfg->freq_tune_hz);
+                    break;
+                }
+                default:
+                    break;
+                }
             }
-        } else if (ui->menu_index == 2) {
-            /* CTCSS detail: rotate steps tone, press switches RX/TX */
-            fmo_config_t cfg;
-            config_store_load(&cfg);
-            if (event == ENCODER_EVENT_PRESS) {
-                ui->ctcss_adjust_field ^= 1;
-            } else if (direction != 0) {
-                float *target = ui->ctcss_adjust_field == 0
-                    ? &cfg.rx_ctcss_hz : &cfg.tx_ctcss_hz;
-                int idx = ctcss_find_index(*target);
-                idx += direction;
-                if (idx < 0) idx = 0;
-                if (idx >= (int)UI_CTCSS_COUNT) idx = (int)UI_CTCSS_COUNT - 1;
-                *target = k_ctcss_tones[idx];
-                if (ui->ctcss_adjust_field == 0)
-                    ui->rx_ctcss_hz = cfg.rx_ctcss_hz;
-                else
-                    ui->tx_ctcss_hz = cfg.tx_ctcss_hz;
-                config_store_save(&cfg);
-                nrl_audio_codec_configure_ctcss(cfg.rx_ctcss_hz, cfg.tx_ctcss_hz);
-            }
-        } else if (ui->menu_index == 5) {
-            /* Audio detail: rotate adjusts field, press switches field */
-            fmo_config_t cfg;
-            config_store_load(&cfg);
+        } else if (ui->menu_index == MENU_AUDIO) {
             if (event == ENCODER_EVENT_PRESS) {
                 ui->audio_adjust_field = (ui->audio_adjust_field + 1) % 7;
             } else if (direction != 0) {
+                fmo_config_t *cfg = edit_cfg(EDIT_DIRTY_AUDIO);
                 switch (ui->audio_adjust_field) {
                 case 0: /* default TX network */
-                    cfg.tx_network = cfg.tx_network == 0 ? 1 : 0;
-                    audio_passthrough_set_tx_network(cfg.tx_network);
+                    cfg->tx_network = cfg->tx_network == 0 ? 1 : 0;
+                    audio_passthrough_set_tx_network(cfg->tx_network);
                     break;
                 case 1: /* NRL codec toggle */
-                    cfg.voice_codec = cfg.voice_codec == 0 ? 1 : 0;
-                    audio_passthrough_set_voice_codec(cfg.voice_codec);
+                    cfg->voice_codec = cfg->voice_codec == 0 ? 1 : 0;
+                    audio_passthrough_set_voice_codec(cfg->voice_codec);
                     break;
                 case 2: /* simultaneous RX policy */
-                    cfg.audio_policy = cfg.audio_policy == 0 ? 1 : 0;
-                    audio_passthrough_set_audio_policy(cfg.audio_policy);
+                    cfg->audio_policy = cfg->audio_policy == 0 ? 1 : 0;
+                    audio_passthrough_set_audio_policy(cfg->audio_policy);
                     break;
-                case 3: /* RX vol */
+                case 3: /* ES8311 DAC volume */
                 {
-                    int vol = (int)cfg.rx_volume + direction;
+                    int vol = (int)cfg->es8311_dac_vol + direction * 5;
                     if (vol < 0) vol = 0;
-                    if (vol > 10) vol = 10;
-                    cfg.rx_volume = (uint8_t)vol;
-                    radio_at_set_volume(false, cfg.rx_volume);
+                    if (vol > FMO_ES8311_DAC_VOL_MAX) vol = FMO_ES8311_DAC_VOL_MAX;
+                    cfg->es8311_dac_vol = (uint8_t)vol;
+                    (void)es8311_codec_set_dac_volume(cfg->es8311_dac_vol);
                     break;
                 }
-                case 4: /* TX vol */
+                case 4: /* ES8311 ADC volume */
                 {
-                    int vol = (int)cfg.tx_volume + direction;
+                    int vol = (int)cfg->es8311_adc_vol + direction * 2;
                     if (vol < 0) vol = 0;
-                    if (vol > 10) vol = 10;
-                    cfg.tx_volume = (uint8_t)vol;
-                    radio_at_set_volume(true, cfg.tx_volume);
+                    if (vol > FMO_ES8311_ADC_VOL_MAX) vol = FMO_ES8311_ADC_VOL_MAX;
+                    cfg->es8311_adc_vol = (uint8_t)vol;
+                    (void)es8311_codec_set_adc_volume(cfg->es8311_adc_vol);
                     break;
                 }
-                case 5: /* software mic gain 1-5 */
+                case 5: /* ES8311 headphone drive */
+                    cfg->es8311_hp_drive = !cfg->es8311_hp_drive;
+                    (void)es8311_codec_set_headphone_drive(
+                        cfg->es8311_hp_drive);
+                    break;
+                case 6: /* software mic gain 1-5 */
                 {
-                    int gain = (int)cfg.mic_gain + direction;
+                    int gain = (int)cfg->mic_gain + direction;
                     if (gain < FMO_MIC_GAIN_MIN) gain = FMO_MIC_GAIN_MIN;
                     if (gain > FMO_MIC_GAIN_MAX) gain = FMO_MIC_GAIN_MAX;
-                    cfg.mic_gain = (uint8_t)gain;
-                    audio_passthrough_set_mic_gain(cfg.mic_gain);
+                    cfg->mic_gain = (uint8_t)gain;
+                    audio_passthrough_set_mic_gain(cfg->mic_gain);
                     break;
                 }
-                case 6: /* ES8311 REG13 HPSW */
-                    cfg.es8311_hp_drive = !cfg.es8311_hp_drive;
-                    (void)es8311_codec_set_headphone_drive(
-                        cfg.es8311_hp_drive);
+                default:
                     break;
                 }
-                config_store_save(&cfg);
             }
-        } else if (ui->menu_index == 3) {
+        } else if (ui->menu_index == MENU_APRS) {
             /* APRS detail: press switches field, rotate toggles it */
             if (event == ENCODER_EVENT_PRESS) {
                 ui->aprs_adjust_field =
@@ -358,44 +460,48 @@ void app_ui_handle(app_ui_t *ui, encoder_event_type_t event)
                     ui->aprs_enabled = !ui->aprs_enabled;
                     ui->aprs_change_pending = true;
                 } else {
-                    fmo_config_t cfg;
-                    config_store_load(&cfg);
+                    fmo_config_t *cfg = edit_cfg(EDIT_DIRTY_APRS);
                     switch (ui->aprs_adjust_field) {
-                    case 1: cfg.aprs_rf_rx = !cfg.aprs_rf_rx; break;
-                    case 2: cfg.aprs_rf_tx = !cfg.aprs_rf_tx; break;
-                    case 3: cfg.aprs_nrl_rx = !cfg.aprs_nrl_rx; break;
-                    case 4: cfg.aprs_nrl_tx = !cfg.aprs_nrl_tx; break;
-                    case 5: cfg.aprs_fwd ^= FMO_APRS_FWD_RF_TO_IS; break;
-                    case 6: cfg.aprs_fwd ^= FMO_APRS_FWD_IS_TO_RF; break;
-                    case 7: cfg.aprs_fwd ^= FMO_APRS_FWD_NRL_TO_IS; break;
-                    case 8: cfg.aprs_fwd ^= FMO_APRS_FWD_IS_TO_NRL; break;
-                    case 9: cfg.aprs_fwd ^= FMO_APRS_FWD_RF_TO_NRL; break;
-                    case 10: cfg.aprs_fwd ^= FMO_APRS_FWD_NRL_TO_RF; break;
+                    case 1: cfg->aprs_rf_rx = !cfg->aprs_rf_rx; break;
+                    case 2: cfg->aprs_rf_tx = !cfg->aprs_rf_tx; break;
+                    case 3: cfg->aprs_nrl_rx = !cfg->aprs_nrl_rx; break;
+                    case 4: cfg->aprs_nrl_tx = !cfg->aprs_nrl_tx; break;
+                    case 5: cfg->aprs_fwd ^= FMO_APRS_FWD_RF_TO_IS; break;
+                    case 6: cfg->aprs_fwd ^= FMO_APRS_FWD_IS_TO_RF; break;
+                    case 7: cfg->aprs_fwd ^= FMO_APRS_FWD_NRL_TO_IS; break;
+                    case 8: cfg->aprs_fwd ^= FMO_APRS_FWD_IS_TO_NRL; break;
+                    case 9: cfg->aprs_fwd ^= FMO_APRS_FWD_RF_TO_NRL; break;
+                    case 10: cfg->aprs_fwd ^= FMO_APRS_FWD_NRL_TO_RF; break;
                     default: break;
                     }
-                    config_store_save(&cfg);
-                    aprs_service_update_config(&cfg);
+                    aprs_service_update_config(cfg);
                 }
             }
-        } else if (ui->menu_index == 4 &&
+        } else if (ui->menu_index == MENU_ESPNOW &&
                    (direction != 0 || event == ENCODER_EVENT_PRESS)) {
             ui->espnow_enabled = !ui->espnow_enabled;
             ui->espnow_change_pending = true;
-        } else if (ui->menu_index == 7 && direction != 0) {
+        } else if (ui->menu_index == MENU_LANGUAGE && direction != 0) {
             ui->chinese = !ui->chinese;
             ui->language_change_pending = true;
-        } else if (ui->menu_index == 6 && event == ENCODER_EVENT_PRESS) {
+        } else if (ui->menu_index == MENU_OTA && event == ENCODER_EVENT_PRESS) {
             fmo_ota_ui_status_t ota = {0};
             ota_service_get_ui_status(&ota);
             if (!ota.checking && !ota.updating) {
                 if (ota.latest_version[0] != '\0' &&
                     strcmp(ota.latest_version, FMO_FIRMWARE_VERSION) != 0) {
-                    (void)ota_service_update_version(ota.latest_version);
+                    if (ui->ota_install_confirm) {
+                        ui->ota_install_confirm = false;
+                        (void)ota_service_update_version(ota.latest_version);
+                    } else {
+                        ui->ota_install_confirm = true;
+                    }
                 } else {
+                    ui->ota_install_confirm = false;
                     (void)ota_service_check_now();
                 }
             }
-        } else if (ui->menu_index == 8) {
+        } else if (ui->menu_index == MENU_NET_RADIO) {
             /* Net radio: rotate = select (live-switch while playing),
              * press = play/stop toggle */
             const int count = (int)net_radio_count();
@@ -440,7 +546,7 @@ static void render_network_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
              2, ui->espnow_enabled ? COLOR_BLACK : COLOR_WHITE,
              ui->espnow_enabled ? COLOR_GREEN : COLOR_DARK, 380);
     gfx_text(canvas, 12, 103,
-             tr(ui, "Rotate/press: switch", "\u65cb\u8f6c/\u6309\u4e0b: \u5f00\u5173"),
+             tr(ui, "Rotate/BOOT: switch", "\u65cb\u8f6c/BOOT: \u5f00\u5173"),
              2, COLOR_ORANGE, COLOR_BLACK, 402);
     gfx_text(canvas, 12, 122,
              tr(ui, "Hold: back", "\u957f\u6309: \u8fd4\u56de"),
@@ -451,7 +557,7 @@ static void render_aprs_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
     aprs_status_t status = {0};
     aprs_service_get_status(&status);
-    fmo_config_t cfg = *cfg_get();
+    fmo_config_t cfg = *cfg_view();
     const uint8_t field = ui->aprs_adjust_field;
     char line[64];
 
@@ -500,9 +606,20 @@ static void render_aprs_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
              status.connected ? COLOR_GREEN : COLOR_GRAY,
              COLOR_BLACK, 205);
     gfx_text(canvas, 10, 122,
-             tr(ui, "Rotate:switch Press:item Hold:back",
-                    "旋转:开关 按下:选项 长按:返回"),
+             tr(ui, "Rotate:switch BOOT:item Hold:back",
+                    "旋转:开关 BOOT:选项 长按:返回"),
              2, COLOR_GRAY, COLOR_BLACK, 402);
+}
+
+static void render_save_state(gfx_canvas_t *canvas)
+{
+    const int64_t now = esp_timer_get_time();
+    if (s_edit_dirty != 0) {
+        gfx_fill_rect(canvas, 394, 18, 28, 3,
+                      s_edit_save_failed ? COLOR_RED : COLOR_ORANGE);
+    } else if (now < s_edit_saved_until_us) {
+        gfx_fill_rect(canvas, 394, 18, 28, 3, COLOR_GREEN);
+    }
 }
 
 static void render_header(gfx_canvas_t *canvas, const char *title)
@@ -620,25 +737,27 @@ static void draw_radio_icon(gfx_canvas_t *canvas, int x, int y)
 static void render_provision(const app_ui_t *ui, gfx_canvas_t *canvas,
                              const network_status_t *net)
 {
-    gfx_text(canvas, 12, 22,
+    gfx_text(canvas, 12, 8,
              tr(ui, "WiFi Provisioning", "\u914d\u7f51\u63d0\u793a"),
              3, COLOR_ORANGE, COLOR_BLACK, 400);
     char line[64];
     snprintf(line, sizeof(line), "WiFi: %s", net->config_ap_ssid);
-    gfx_text(canvas, 12, 55, line, 2, COLOR_GREEN, COLOR_BLACK, 400);
-    gfx_text(canvas, 12, 75,
+    gfx_text(canvas, 12, 36, line, 2, COLOR_GREEN, COLOR_BLACK, 400);
+    gfx_text(canvas, 12, 56,
              tr(ui, "Password: none (open)",
                     "\u5bc6\u7801: \u65e0\uff08\u5f00\u653e\uff09"),
              2, COLOR_WHITE, COLOR_BLACK, 400);
-    gfx_text(canvas, 12, 95,
+    gfx_text(canvas, 12, 76,
              tr(ui, "Open browser: 192.168.4.1",
                     "\u6d4f\u89c8\u5668\u6253\u5f00: 192.168.4.1"),
              2, COLOR_WHITE, COLOR_BLACK, 400);
-    gfx_text(canvas, 12, 118,
-             tr(ui, "After saving WiFi, device restarts",
-                    "\u4fdd\u5b58WiFi\u540e\u8bbe\u5907\u81ea\u52a8\u91cd\u8fde"),
+    gfx_text(canvas, 12, 98,
+             tr(ui, "The setup page should open automatically",
+                    "\u914d\u7f51\u9875\u5e94\u4f1a\u81ea\u52a8\u6253\u5f00"),
              2, COLOR_GRAY, COLOR_BLACK, 400);
-    gfx_text(canvas, 12, 138, "BLE: OpenFMO-CFG",
+    gfx_text(canvas, 12, 120,
+             tr(ui, "Scan nearby WiFi on the setup page",
+                    "\u5728\u914d\u7f51\u9875\u626b\u63cf\u9644\u8fd1WiFi"),
              2, COLOR_GREEN, COLOR_BLACK, 400);
 }
 
@@ -1238,76 +1357,77 @@ static void render_menu(const app_ui_t *ui, gfx_canvas_t *canvas)
         int column = index & 1;
         int row = index / 2;
         int x = 5 + column * 211;
-        int y = 23 + row * 23;  /* 5 rows must fit the 142px-high canvas */
+        int y = 24 + row * 28;
         bool selected = index == ui->menu_index;
         uint16_t background = selected ? COLOR_ORANGE : COLOR_BLACK;
         uint16_t foreground = selected ? COLOR_BLACK : COLOR_WHITE;
-        gfx_fill_rect(canvas, x, y, 207, 22, background);
+        gfx_fill_rect(canvas, x, y, 207, 26, background);
         char line[40];
         snprintf(line, sizeof(line), "%c %s", selected ? '>' : ' ',
                  menu_text(ui, index));
-        gfx_text(canvas, x + 5, y + 3, line, 2, foreground, background, 197);
+        gfx_text(canvas, x + 5, y + 5, line, 2, foreground, background, 197);
     }
 }
 
 static void render_server_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
-    if (ui->server_select_mode == 0) {
-        gfx_text(canvas, 8, 31,
-                 tr(ui, "Turn left: FMO list",
-                    "\u5de6\u65cb: FMO \u670d\u52a1\u5668"),
-                 2, COLOR_ORANGE, COLOR_BLACK, 410);
-        gfx_text(canvas, 8, 59,
-                 tr(ui, "Turn right: NRL list",
-                    "\u53f3\u65cb: NRL \u670d\u52a1\u5668"),
-                 2, COLOR_PURPLE, COLOR_BLACK, 410);
-        gfx_text(canvas, 8, 92,
-                 tr(ui, "Web: /servers",
-                    "Web \u7ba1\u7406: /servers"),
-                 2, COLOR_GRAY, COLOR_BLACK, 410);
-        gfx_text(canvas, 8, 122,
-                 tr(ui, "Hold: back", "\u957f\u6309: \u8fd4\u56de"),
-                 2, COLOR_GRAY, COLOR_BLACK, 410);
-        return;
-    }
+    const bool fmo_mode = ui->server_select_mode == 2;
+    gfx_fill_rect(canvas, 6, 24, 202, 23,
+                  fmo_mode ? COLOR_BLACK : COLOR_PURPLE);
+    gfx_fill_rect(canvas, 214, 24, 208, 23,
+                  fmo_mode ? COLOR_ORANGE : COLOR_BLACK);
+    gfx_text(canvas, 72, 29, "NRL", 2,
+             fmo_mode ? COLOR_GRAY : COLOR_WHITE,
+             fmo_mode ? COLOR_BLACK : COLOR_PURPLE, 80);
+    gfx_text(canvas, 282, 29, "FMO", 2,
+             fmo_mode ? COLOR_BLACK : COLOR_GRAY,
+             fmo_mode ? COLOR_ORANGE : COLOR_BLACK, 80);
+
     if (ui->server_select_mode == 2) {
         const fmo_server_t *server =
-            fmo_server_directory_get(ui->fmo_server_index);
+            fmo_server_directory_get_favorite(ui->fmo_favorite_index);
+        const size_t count = fmo_server_directory_favorite_count();
         char line[160];
-        gfx_text(canvas, 8, 25, "FMO",
-                 2, COLOR_ORANGE, COLOR_BLACK, 410);
-        gfx_fill_rect(canvas, 6, 43, 416, 31, COLOR_ORANGE);
+        gfx_fill_rect(canvas, 6, 52, 416, 29, COLOR_ORANGE);
         format_fmo_server_list(line, sizeof(line), server);
-        draw_marquee(canvas, 14, 50, 400, line,
+        draw_marquee(canvas, 14, 58, 400, line,
                      COLOR_BLACK, COLOR_ORANGE);
-        snprintf(line, sizeof(line), "%s:%u  %s",
+        snprintf(line, sizeof(line), "%u/%u  %s:%u",
+                 count > 0 ? (unsigned)ui->fmo_favorite_index + 1 : 0,
+                 (unsigned)count,
                  server != NULL ? server->host : "-",
-                 server != NULL ? (unsigned)server->port : 0,
-                 server != NULL && server->favorite ? "[FAVORITE]" : "");
-        gfx_text(canvas, 8, 81, line, 2, COLOR_WHITE, COLOR_BLACK, 410);
-        gfx_text(canvas, 8, 103,
-                 tr(ui, "Press: favorite on/off",
-                    "\u6309\u4e0b: \u6536\u85cf/\u53d6\u6d88\u6536\u85cf"),
-                 2, COLOR_ORANGE, COLOR_BLACK, 410);
+                 server != NULL ? (unsigned)server->port : 0);
+        gfx_text(canvas, 8, 86, line, 2, COLOR_WHITE, COLOR_BLACK, 410);
+        if (count == 0) {
+            gfx_text(canvas, 8, 105,
+                     tr(ui, "Add favorites on Web /servers",
+                        "\u8bf7\u5728 Web /servers \u6dfb\u52a0\u6536\u85cf"),
+                     2, COLOR_GRAY, COLOR_BLACK, 410);
+        }
         gfx_text(canvas, 8, 122,
-                 tr(ui, "Rotate:list Hold:back",
-                    "\u65cb\u8f6c:\u5217\u8868 \u957f\u6309:\u8fd4"),
+                 tr(ui, "Rotate:favorite BOOT:NRL Hold:back",
+                    "\u65cb\u8f6c:\u6536\u85cf BOOT:NRL \u957f\u6309:\u8fd4"),
                  2, COLOR_GRAY, COLOR_BLACK, 410);
         return;
     }
     const nrl_server_t *server = server_directory_get(ui->server_index);
+    const size_t count = server_directory_count();
     char line[160];
-    gfx_text(canvas, 8, 26, tr(ui, "Server", "\u670d\u52a1\u5668"),
-             2, COLOR_GRAY, COLOR_BLACK, 410);
-    gfx_fill_rect(canvas, 6, 44, 416, 31, COLOR_PURPLE);
+    gfx_fill_rect(canvas, 6, 52, 416, 29, COLOR_PURPLE);
     format_server(line, sizeof(line), server);
-    draw_marquee(canvas, 14, 51, 400, line, COLOR_WHITE, COLOR_PURPLE);
-    snprintf(line, sizeof(line), "%s:%u", server ? server->host : "-",
+    draw_marquee(canvas, 14, 58, 400, line, COLOR_WHITE, COLOR_PURPLE);
+    snprintf(line, sizeof(line), "%u/%u  %s:%u",
+             count > 0 ? (unsigned)ui->server_index + 1 : 0,
+             (unsigned)count, server ? server->host : "-",
              server ? server->port : 0);
-    gfx_text(canvas, 8, 82, line, 2, COLOR_WHITE, COLOR_BLACK, 410);
+    gfx_text(canvas, 8, 86, line, 2, COLOR_WHITE, COLOR_BLACK, 410);
+    gfx_text(canvas, 8, 105,
+             tr(ui, "Selection applies automatically",
+                "\u9009\u62e9\u540e\u81ea\u52a8\u5207\u6362"),
+             2, COLOR_GREEN, COLOR_BLACK, 410);
     gfx_text(canvas, 8, 122,
-             tr(ui, "Rotate:select Press:confirm Hold:back",
-                "\u65cb\u8f6c:\u9009\u62e9 \u6309\u4e0b:\u786e\u8ba4 \u957f\u6309:\u8fd4\u56de"),
+             tr(ui, "Rotate:server BOOT:FMO Hold:back",
+                "\u65cb\u8f6c:\u670d\u52a1\u5668 BOOT:FMO \u957f\u6309:\u8fd4"),
              2, COLOR_GRAY, COLOR_BLACK, 410);
 }
 
@@ -1342,7 +1462,7 @@ static void render_ota_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
                  2, COLOR_RED, COLOR_BLACK, 410);
         gfx_text(canvas, 8, 68, ota.last_error, 1, COLOR_WHITE, COLOR_BLACK, 410);
         gfx_text(canvas, 8, 103,
-                 tr(ui, "Press: check again", "\u6309\u4e0b: \u91cd\u65b0\u68c0\u67e5"),
+                 tr(ui, "BOOT: check again", "BOOT: \u91cd\u65b0\u68c0\u67e5"),
                  2, COLOR_ORANGE, COLOR_BLACK, 410);
     } else if (ota.latest_version[0] != '\0' &&
                strcmp(ota.latest_version, FMO_FIRMWARE_VERSION) != 0) {
@@ -1351,8 +1471,13 @@ static void render_ota_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
                  ota.latest_version);
         gfx_text(canvas, 8, 49, line, 3, COLOR_ORANGE, COLOR_BLACK, 410);
         gfx_text(canvas, 8, 86,
-                 tr(ui, "Press: install", "\u6309\u4e0b: \u5b89\u88c5\u5347\u7ea7"),
-                 2, COLOR_WHITE, COLOR_BLACK, 410);
+                 ui->ota_install_confirm
+                     ? tr(ui, "BOOT again to confirm install",
+                          "\u518d\u6309 BOOT \u786e\u8ba4\u5b89\u88c5")
+                     : tr(ui, "BOOT: prepare install",
+                          "BOOT: \u51c6\u5907\u5b89\u88c5"),
+                 2, ui->ota_install_confirm ? COLOR_RED : COLOR_WHITE,
+                 COLOR_BLACK, 410);
     } else if (ota.latest_version[0] != '\0') {
         gfx_text(canvas, 8, 50,
                  tr(ui, "Firmware is current", "\u5f53\u524d\u5df2\u662f\u6700\u65b0\u7248\u672c"),
@@ -1361,7 +1486,7 @@ static void render_ota_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
         gfx_text(canvas, 8, 47, "NRL OTA", 2, COLOR_GRAY, COLOR_BLACK, 410);
         gfx_text(canvas, 8, 67, ota.server_url, 1, COLOR_WHITE, COLOR_BLACK, 410);
         gfx_text(canvas, 8, 96,
-                 tr(ui, "Press: check update", "\u6309\u4e0b: \u68c0\u67e5\u5347\u7ea7"),
+                 tr(ui, "BOOT: check update", "BOOT: \u68c0\u67e5\u5347\u7ea7"),
                  2, COLOR_ORANGE, COLOR_BLACK, 410);
     }
     gfx_text(canvas, 8, 122,
@@ -1393,89 +1518,97 @@ static void render_language_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 
 static void render_radio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
-    fmo_config_t cfg = *cfg_get();
-    char line[64];
+    fmo_config_t cfg = *cfg_view();
+    char line[80];
     const uint8_t field = ui->radio_adjust_field;
-
-    /* RX frequency */
-    uint16_t c = field == 0 ? COLOR_ORANGE : COLOR_WHITE;
-    snprintf(line, sizeof(line), "%c RX: %.4f MHz", field == 0 ? '>' : ' ',
-             (double)cfg.radio_rx_mhz);
-    gfx_text(canvas, 8, 28, line, 2, c, COLOR_BLACK, 410);
-
-    /* TX frequency */
-    c = field == 1 ? COLOR_ORANGE : COLOR_WHITE;
-    snprintf(line, sizeof(line), "%c TX: %.4f MHz", field == 1 ? '>' : ' ',
-             (double)cfg.radio_tx_mhz);
-    gfx_text(canvas, 8, 50, line, 2, c, COLOR_BLACK, 410);
-
-    /* Squelch */
-    c = field == 2 ? COLOR_ORANGE : COLOR_WHITE;
-    snprintf(line, sizeof(line), "%c SQL: %u", field == 2 ? '>' : ' ',
-             (unsigned)cfg.squelch);
-    gfx_text(canvas, 8, 72, line, 2, c, COLOR_BLACK, 200);
-
-    /* TX Power */
-    c = field == 3 ? COLOR_ORANGE : COLOR_WHITE;
     const char *pwr_str[] = {"LOW", "MID", "HIGH"};
-    snprintf(line, sizeof(line), "%c PWR: %s", field == 3 ? '>' : ' ',
-             pwr_str[cfg.tx_power <= 2 ? cfg.tx_power : 0]);
-    gfx_text(canvas, 220, 72, line, 2, c, COLOR_BLACK, 200);
+    nrl_audio_ctcss_status_t ctcss = {0};
+    nrl_audio_codec_get_ctcss_status(&ctcss);
 
-    /* RF enabled */
-    c = field == 4 ? COLOR_ORANGE : (cfg.rf_enabled ? COLOR_GREEN : COLOR_RED);
-    snprintf(line, sizeof(line), "%c RF: %s", field == 4 ? '>' : ' ',
-             cfg.rf_enabled ? "ON" : "OFF");
-    gfx_text(canvas, 8, 94, line, 2, c, COLOR_BLACK, 200);
+    /* Keep RF enable first and always visible, but use the same visual weight
+     * as a normal setting row.  The compact state badge provides status
+     * without turning the whole row into a bright banner. */
+    snprintf(line, sizeof(line), "%c Enable RF board",
+             field == 0 ? '>' : ' ');
+    gfx_text(canvas, 8, 28, line, 2,
+             field == 0 ? COLOR_ORANGE : COLOR_WHITE,
+             COLOR_BLACK, 250);
+    const uint16_t state_color = cfg.rf_enabled ? COLOR_GREEN : COLOR_RED;
+    gfx_rect(canvas, 326, 25, 88, 20, state_color);
+    gfx_text(canvas, 344, 28, cfg.rf_enabled ? "ON" : "OFF", 2,
+             state_color, COLOR_BLACK, 60);
+    if (ctcss.rx_detected_hz > 0.0f) {
+        snprintf(line, sizeof(line), "DET %.1fHz",
+                 (double)ctcss.rx_detected_hz);
+        gfx_text(canvas, 220, 28, line, 1, COLOR_GRAY, COLOR_BLACK, 100);
+    }
+
+    int first = field <= 4 ? 1 : (int)field - 3;
+    if (first > 6) first = 6;
+    for (int slot = 0; slot < 4; ++slot) {
+        const int item = first + slot;
+        switch (item) {
+        case 1:
+            snprintf(line, sizeof(line), "%c RX: %.4f MHz",
+                     field == item ? '>' : ' ', (double)cfg.radio_rx_mhz);
+            break;
+        case 2:
+            snprintf(line, sizeof(line), "%c TX: %.4f MHz",
+                     field == item ? '>' : ' ', (double)cfg.radio_tx_mhz);
+            break;
+        case 3:
+            if (cfg.rx_ctcss_hz > 0.0f)
+                snprintf(line, sizeof(line), "%c RX CTCSS: %.1f Hz",
+                         field == item ? '>' : ' ', (double)cfg.rx_ctcss_hz);
+            else
+                snprintf(line, sizeof(line), "%c RX CTCSS: OFF",
+                         field == item ? '>' : ' ');
+            break;
+        case 4:
+            if (cfg.tx_ctcss_hz > 0.0f)
+                snprintf(line, sizeof(line), "%c TX CTCSS: %.1f Hz",
+                         field == item ? '>' : ' ', (double)cfg.tx_ctcss_hz);
+            else
+                snprintf(line, sizeof(line), "%c TX CTCSS: OFF",
+                         field == item ? '>' : ' ');
+            break;
+        case 5:
+            snprintf(line, sizeof(line), "%c SQL: %u",
+                     field == item ? '>' : ' ', (unsigned)cfg.squelch);
+            break;
+        case 6:
+            snprintf(line, sizeof(line), "%c Power: %s",
+                     field == item ? '>' : ' ',
+                     pwr_str[cfg.tx_power <= 2 ? cfg.tx_power : 0]);
+            break;
+        case 7:
+            snprintf(line, sizeof(line), "%c RF RX Vol: %u",
+                     field == item ? '>' : ' ', (unsigned)cfg.rx_volume);
+            break;
+        case 8:
+            snprintf(line, sizeof(line), "%c RF TX Vol: %u",
+                     field == item ? '>' : ' ', (unsigned)cfg.tx_volume);
+            break;
+        default:
+            snprintf(line, sizeof(line), "%c Freq Tune: %+d Hz",
+                     field == item ? '>' : ' ', (int)cfg.freq_tune_hz);
+            break;
+        }
+        gfx_text(canvas, 8, 51 + slot * 17, line, 2,
+                 field == item ? COLOR_ORANGE : COLOR_WHITE,
+                 COLOR_BLACK, 410);
+    }
 
     gfx_text(canvas, 8, 120,
-             tr(ui, "Rotate:adjust Press:field Hold:back",
-                "\u65cb\u8f6c:\u8c03\u6574 \u6309\u4e0b:\u5207\u6362 \u957f\u6309:\u8fd4\u56de"),
+             tr(ui, "Rotate:adjust BOOT:field Hold:back",
+                "\u65cb\u8f6c:\u8c03\u6574 BOOT:\u5207\u6362 \u957f\u6309:\u8fd4"),
              2, COLOR_GRAY, COLOR_BLACK, 410);
-}
-
-static void render_ctcss_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
-{
-    fmo_config_t cfg = *cfg_get();
-    char line[64];
-    const uint8_t field = ui->ctcss_adjust_field;
-
-    /* RX CTCSS */
-    uint16_t c = field == 0 ? COLOR_ORANGE : COLOR_WHITE;
-    if (cfg.rx_ctcss_hz > 0.0f)
-        snprintf(line, sizeof(line), "%c RX: %.1f Hz", field == 0 ? '>' : ' ',
-                 (double)cfg.rx_ctcss_hz);
-    else
-        snprintf(line, sizeof(line), "%c RX: OFF", field == 0 ? '>' : ' ');
-    gfx_text(canvas, 8, 28, line, 2, c, COLOR_BLACK, 410);
-
-    /* TX CTCSS */
-    c = field == 1 ? COLOR_ORANGE : COLOR_WHITE;
-    if (cfg.tx_ctcss_hz > 0.0f)
-        snprintf(line, sizeof(line), "%c TX: %.1f Hz", field == 1 ? '>' : ' ',
-                 (double)cfg.tx_ctcss_hz);
-    else
-        snprintf(line, sizeof(line), "%c TX: OFF", field == 1 ? '>' : ' ');
-    gfx_text(canvas, 8, 50, line, 2, c, COLOR_BLACK, 410);
-
-    /* Detected tone */
-    nrl_audio_ctcss_status_t st = {0};
-    nrl_audio_codec_get_ctcss_status(&st);
-    if (st.rx_detected_hz > 0.0f)
-        snprintf(line, sizeof(line), "DET: %.1f Hz", (double)st.rx_detected_hz);
-    else
-        strlcpy(line, "DET: --", sizeof(line));
-    gfx_text(canvas, 8, 78, line, 2, COLOR_GREEN, COLOR_BLACK, 410);
-
-    gfx_text(canvas, 8, 120,
-             tr(ui, "Rotate:tone Press:RX/TX Hold:back",
-                "\u65cb\u8f6c:\u4e9a\u97f3 \u6309\u4e0b:RX/TX \u957f\u6309:\u8fd4\u56de"),
-             2, COLOR_GRAY, COLOR_BLACK, 410);
+    render_save_state(canvas);
 }
 
 static void render_audio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
-    fmo_config_t cfg = *cfg_get();
+    fmo_config_t cfg = *cfg_view();
     char line[64];
     const uint8_t field = ui->audio_adjust_field;
     for (uint8_t row = 0; row < 7; ++row) {
@@ -1496,30 +1629,31 @@ static void render_audio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
                      cfg.audio_policy == 0 ? "MIX" : "FIRST");
             break;
         case 3:
-            snprintf(line, sizeof(line), "%c RX Vol: %u",
-                     field == row ? '>' : ' ', (unsigned)cfg.rx_volume);
+            snprintf(line, sizeof(line), "%c ES8311 DAC: %u",
+                     field == row ? '>' : ' ', (unsigned)cfg.es8311_dac_vol);
             break;
         case 4:
-            snprintf(line, sizeof(line), "%c TX Vol: %u",
-                     field == row ? '>' : ' ', (unsigned)cfg.tx_volume);
+            snprintf(line, sizeof(line), "%c ES8311 ADC: %u",
+                     field == row ? '>' : ' ', (unsigned)cfg.es8311_adc_vol);
             break;
         case 5:
-            snprintf(line, sizeof(line), "%c MIC Gain: %ux",
-                     field == row ? '>' : ' ', (unsigned)cfg.mic_gain);
-            break;
-        default:
             snprintf(line, sizeof(line), "%c ES8311 HP: %s",
                      field == row ? '>' : ' ',
                      cfg.es8311_hp_drive ? "ON" : "OFF");
+            break;
+        default:
+            snprintf(line, sizeof(line), "%c MIC Gain: %ux",
+                     field == row ? '>' : ' ', (unsigned)cfg.mic_gain);
             break;
         }
         uint16_t color = field == row ? COLOR_ORANGE : COLOR_WHITE;
         if (row == 0 && field != row) {
             color = cfg.tx_network == 1 ? COLOR_ORANGE : COLOR_PURPLE;
         }
-        gfx_text(canvas, 8, 20 + row * 17, line, 2,
+        gfx_text(canvas, 8, 22 + row * 15, line, 2,
                  color, COLOR_BLACK, 410);
     }
+    render_save_state(canvas);
 }
 
 static void render_net_radio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
@@ -1588,32 +1722,30 @@ static void render_net_radio_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
     }
 
     gfx_text(canvas, 8, 122,
-             tr(ui, "Rotate:station Press:play/stop Hold:back",
-                "\u65cb\u8f6c:\u9009\u53f0 \u6309\u4e0b:\u64ad\u653e/\u505c\u6b62 \u957f\u6309:\u8fd4\u56de"),
+             tr(ui, "Rotate:station BOOT:play/stop Hold:back",
+                "\u65cb\u8f6c:\u9009\u53f0 BOOT:\u64ad\u653e/\u505c\u6b62 \u957f\u6309:\u8fd4\u56de"),
              2, COLOR_GRAY, COLOR_BLACK, 410);
 }
 
 static void render_detail(const app_ui_t *ui, gfx_canvas_t *canvas)
 {
     render_header(canvas, menu_text(ui, ui->menu_index));
-    if (ui->menu_index == 0) {
+    if (ui->menu_index == MENU_SERVERS) {
         render_server_detail(ui, canvas);
-    } else if (ui->menu_index == 1) {
+    } else if (ui->menu_index == MENU_RADIO) {
         render_radio_detail(ui, canvas);
-    } else if (ui->menu_index == 2) {
-        render_ctcss_detail(ui, canvas);
-    } else if (ui->menu_index == 3) {
-        render_aprs_detail(ui, canvas);
-    } else if (ui->menu_index == 4) {
-        render_network_detail(ui, canvas);
-    } else if (ui->menu_index == 5) {
+    } else if (ui->menu_index == MENU_AUDIO) {
         render_audio_detail(ui, canvas);
-    } else if (ui->menu_index == 6) {
-        render_ota_detail(ui, canvas);
-    } else if (ui->menu_index == 7) {
-        render_language_detail(ui, canvas);
-    } else if (ui->menu_index == 8) {
+    } else if (ui->menu_index == MENU_APRS) {
+        render_aprs_detail(ui, canvas);
+    } else if (ui->menu_index == MENU_ESPNOW) {
+        render_network_detail(ui, canvas);
+    } else if (ui->menu_index == MENU_NET_RADIO) {
         render_net_radio_detail(ui, canvas);
+    } else if (ui->menu_index == MENU_OTA) {
+        render_ota_detail(ui, canvas);
+    } else if (ui->menu_index == MENU_LANGUAGE) {
+        render_language_detail(ui, canvas);
     } else {
         gfx_text(canvas, 12, 35,
                  tr(ui, "Migration in progress",

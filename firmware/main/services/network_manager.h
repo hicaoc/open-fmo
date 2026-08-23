@@ -17,6 +17,9 @@ typedef struct {
 esp_err_t network_manager_start(const fmo_config_t *config);
 esp_err_t network_manager_update_profiles(const fmo_config_t *config, bool reconnect);
 esp_err_t network_manager_scan_records(wifi_ap_record_t *records, uint16_t *count);
+/** Return the most recent scan without touching the radio. */
+esp_err_t network_manager_cached_scan_records(wifi_ap_record_t *records,
+                                              uint16_t *count);
 void network_manager_get_status(network_status_t *status);
 /** Force-enable config AP + DNS for provisioning (e.g. BOOT long-press). */
 esp_err_t network_manager_enter_provision(void);

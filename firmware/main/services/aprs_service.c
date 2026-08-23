@@ -46,7 +46,10 @@ static size_t s_recent_count;
  * PSRAM.  Keeping it out of internal DRAM is important after Wi-Fi, the web
  * portal, and the AFSK decoder have started on the 2 MB-PSRAM target. */
 static StaticTask_t s_task_tcb;
-static EXT_RAM_BSS_ATTR StackType_t s_task_stack[8192 / sizeof(StackType_t)];
+/* The task keeps the full config plus RX/AFSK line buffers on its frame, and
+ * send_beacon() -> send_line() adds another ~1.6 KB when APRS-IS becomes
+ * verified.  Reserve 16 KB in PSRAM for the forwarding and FMO-V4 paths. */
+static EXT_RAM_BSS_ATTR StackType_t s_task_stack[16384 / sizeof(StackType_t)];
 
 static uint32_t now_ms(void)
 {

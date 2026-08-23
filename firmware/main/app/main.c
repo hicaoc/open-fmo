@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -9,6 +10,7 @@
 #include "nv3007.h"
 #include "status_io.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -40,6 +42,14 @@
 #include "esp_sntp.h"
 
 static const char *TAG = "open_fmo";
+
+static void verify_heap(const char *stage)
+{
+    if (!heap_caps_check_integrity_all(true)) {
+        ESP_LOGE(TAG, "heap corruption first detected after %s", stage);
+        abort();
+    }
+}
 
 /* BOOT button (GPIO 0): menu enter/confirm. */
 #define BOOT_PIN GPIO_NUM_0
@@ -197,9 +207,16 @@ void app_main(void)
     fmo_config_t config;
     ESP_ERROR_CHECK(config_store_load(&config));
 
-    /* Release BT controller memory early unless BLE provisioning is needed */
-    const bool need_ble = config.ble_provisioning_enabled &&
-                          config_store_wifi_count(&config) == 0;
+    /* On this ESP32-S3 rev 0.2, initializing NimBLE while the provisioning
+     * SoftAP is active can starve the DHCP exchange long enough for phones to
+     * time out.  Web provisioning owns the radio on first boot, so release BT
+     * before Wi-Fi starts.  BLE must never run concurrently with this AP. */
+    const bool needs_web_provisioning = config_store_wifi_count(&config) == 0;
+    const bool need_ble = false;
+    if (config.ble_provisioning_enabled &&
+        needs_web_provisioning) {
+        ESP_LOGI(TAG, "Web provisioning selected; BLE disabled to protect DHCP");
+    }
     if (!need_ble) {
         esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
     }
@@ -244,9 +261,6 @@ void app_main(void)
             }
         }
     }
-    app_ui_render(&ui, &canvas);
-    ESP_ERROR_CHECK(nv3007_flush_rgb565(canvas.pixels, canvas.width, canvas.height));
-
     if (radio_at_init() == ESP_OK) {
         char module_name[32];
         esp_err_t probe_error = ESP_FAIL;
@@ -265,10 +279,22 @@ void app_main(void)
             ESP_LOGW(TAG, "RF module did not answer AT+NAME?");
         }
     }
+    verify_heap("RF initialization");
     ESP_ERROR_CHECK(ota_service_init());
+    verify_heap("OTA initialization");
     /* COM-port (USB Serial/JTAG console) AT command listener */
     ESP_ERROR_CHECK(serial_at_init());
+    verify_heap("serial AT initialization");
     ESP_ERROR_CHECK(network_manager_start(&config));
+    if (needs_web_provisioning) {
+        /* network_manager_start() performs the initial scan synchronously and
+         * starts the AP afterwards.  Only now show the provisioning prompt, so
+         * the browser can immediately select from the cached hotspot list. */
+        app_ui_render(&ui, &canvas);
+        ESP_ERROR_CHECK(nv3007_flush_rgb565(
+            canvas.pixels, canvas.width, canvas.height));
+        verify_heap("initial provisioning UI render");
+    }
 
     /* Start NTP time sync (China Standard Time UTC+8) */
     setenv("TZ", "CST-8", 1);
@@ -283,6 +309,27 @@ void app_main(void)
         if (ble_err != ESP_OK) {
             ESP_LOGW(TAG, "BLE provisioning unavailable: %s",
                      esp_err_to_name(ble_err));
+        } else {
+            /* BLE is a provisioning-only transport. Do not start the
+             * memory-heavy audio and network-radio services until the new
+             * Wi-Fi profile has obtained an IP and BLE has been torn down.
+             * Keep refreshing the UI here: the normal UI loop starts only
+             * after these services are initialized. */
+            ESP_LOGI(TAG, "provisioning mode: waiting for WiFi before starting services");
+            int64_t last_provision_render_us = 0;
+            while (ble_provision_is_active()) {
+                ble_provision_poll();
+                const int64_t now_us = esp_timer_get_time();
+                if (now_us - last_provision_render_us >= 250000) {
+                    app_ui_render(&ui, &canvas);
+                    ESP_ERROR_CHECK(nv3007_flush_rgb565(
+                        canvas.pixels, canvas.width, canvas.height));
+                    last_provision_render_us = now_us;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            ESP_ERROR_CHECK(config_store_load(&config));
+            ESP_LOGI(TAG, "provisioning complete; starting normal services");
         }
     }
     ESP_ERROR_CHECK(aprs_service_start(&config));
@@ -310,7 +357,12 @@ void app_main(void)
     }
     esp_err_t fmo_err = fmo_link_start(&config);
     if (fmo_err != ESP_OK) {
-        ESP_LOGW(TAG, "fmo_link_start failed: %s", esp_err_to_name(fmo_err));
+        ESP_LOGW(TAG, "fmo_link_start failed: %s (internal free=%u largest=%u)",
+                 esp_err_to_name(fmo_err),
+                 (unsigned)heap_caps_get_free_size(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     /* FMO-V4 STATION broadcast (own-server advertisement via APRS-IS);
      * runs gated on link/role/APRS state, so start order is not critical. */
@@ -329,8 +381,12 @@ void app_main(void)
     /* Net radio: station list (NVS) + decoder registration; the player task
      * starts on demand when a station is played. */
     ESP_ERROR_CHECK(net_radio_init());
-    ESP_LOGI(TAG, "UI ready: rotate=server/menu, knob press=TX network, "
-                  "BOOT=enter, hold=back");
+    app_ui_render(&ui, &canvas);
+    ESP_ERROR_CHECK(nv3007_flush_rgb565(
+        canvas.pixels, canvas.width, canvas.height));
+    verify_heap("first fully initialized UI render");
+    ESP_LOGI(TAG, "UI ready: rotate=select/adjust, knob press on main=TX network, "
+                  "BOOT=enter/field, hold=back");
 
     int64_t server_changed_at_us = 0;
     bool server_save_pending = false;
@@ -396,7 +452,8 @@ void app_main(void)
                     fmo_qso_answer(false);
                     ESP_LOGI(TAG, "FMO call rejected");
                 }
-            } else if (event.type == ENCODER_EVENT_PRESS) {
+            } else if (event.type == ENCODER_EVENT_PRESS &&
+                       ui.page == APP_UI_MAIN) {
                 fmo_config_t fresh;
                 esp_err_t tx_error = config_store_load(&fresh);
                 if (tx_error == ESP_OK) {
@@ -416,7 +473,7 @@ void app_main(void)
                     ESP_LOGE(TAG, "TX network switch failed: %s",
                              esp_err_to_name(tx_error));
                 }
-            } else {
+            } else if (event.type != ENCODER_EVENT_PRESS) {
                 const encoder_event_type_t ui_event =
                     event.type == ENCODER_EVENT_BOOT_PRESS
                         ? ENCODER_EVENT_PRESS : event.type;
@@ -499,13 +556,10 @@ void app_main(void)
                      event.type, ui.page, (unsigned)ui.server_index, ui.menu_index);
         }
         /* Menu idle timeout: 10s without input returns to the main page.
-         * Suppressed while net radio is playing so music is not interrupted
-         * (and the page keeps showing the live playback state). Also
-         * suppressed while an OTA update is running so the upgrade page
-         * stays on screen until it finishes. */
+         * Net radio keeps playing in the background.  The timeout is only
+         * suppressed while an OTA update is running so progress remains
+         * visible until it finishes. */
         if (ui.page != APP_UI_MAIN &&
-            !(ui.page == APP_UI_DETAIL && ui.menu_index == 8 &&
-              net_radio_is_playing()) &&
             esp_timer_get_time() - last_input_at_us >= 10000000) {
             fmo_ota_ui_status_t ota_status = {0};
             ota_service_get_ui_status(&ota_status);
@@ -597,6 +651,7 @@ void app_main(void)
             fmo_save_pending = false;
             server_changed_at_us = 0;
         }
+        if (app_ui_poll()) render_needed = true;
         const int64_t now_us = esp_timer_get_time();
         const int64_t refresh_interval_us = ui.page == APP_UI_MAIN ? 100000 : 1000000;
         if (render_needed || now_us - last_render_at_us >= refresh_interval_us) {
