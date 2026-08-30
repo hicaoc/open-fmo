@@ -24,6 +24,11 @@ typedef struct {
 
 esp_err_t fmo_link_start(const fmo_config_t *config);
 void fmo_link_update_config(const fmo_config_t *config);
+
+/* Ask the internal-RAM FMO control task to reload the certificate chain and
+ * reconnect.  Call after a certificate upload; do not read SPIFFS from an
+ * external-PSRAM task such as the audio pipeline. */
+void fmo_link_request_certificate_refresh(void);
 void fmo_link_get_status(fmo_link_status_t *status);
 bool fmo_link_tx_begin(void);
 bool fmo_link_tx_feed_pcm16(const int16_t *samples, size_t sample_count);

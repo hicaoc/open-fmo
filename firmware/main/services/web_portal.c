@@ -12,11 +12,13 @@
 #include "esp_ota_ops.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "services/config_store.h"
+#include "services/fmo_activate.h"
 #include "services/fmo_cert_store.h"
 #include "services/fmo_discovery.h"
 #include "services/fmo_link.h"
@@ -297,6 +299,8 @@ static const char k_servers_html[] =
     "<select id=fmo_sort onchange=renderFmo()><option value=default>&#40664;&#35748;&#39034;&#24207;</option><option value=favorite>&#25910;&#34255;&#20248;&#20808;</option><option value=name>&#21517;&#31216;&#25490;&#24207;</option><option value=online>&#22312;&#32447;&#20154;&#25968;</option><option value=total>&#24635;&#20154;&#25968;</option></select></div>"
     "<p id=fmo_count class=muted></p><table><thead><tr><th>&#25910;&#34255;</th><th>&#21517;&#31216;</th><th>&#22320;&#22336;</th><th>&#22312;&#32447;</th><th></th></tr></thead><tbody id=fmo></tbody></table></section>"
     "<section><h2>FMO &#35777;&#20070;</h2><p class=muted>&#31169;&#38053;&#21482;&#20889;&#20837; Flash&#65292;&#19981;&#25552;&#20379;&#35835;&#22238;&#25509;&#21475;&#12290;</p><pre id=certstatus></pre>"
+    "<p><strong>&#33258;&#21160;&#30003;&#35831;&#35777;&#20070;</strong></p><p class=muted>&#26412;&#26426; MAC: <span id=act_mac>--</span>&#12290;&#35831;&#20808;&#22312; hamptt.com &#30331;&#35760;&#24182;&#32465;&#23450;&#27492; MAC&#12290;</p>"
+    "<label>&#35777;&#20070;&#26381;&#21153;&#22120; <input id=act_host maxlength=128 placeholder=www.hamptt.com></label><button onclick=saveActivateHost()>&#20445;&#23384;&#22320;&#22336;</button><button onclick=runActivate()>&#33258;&#21160;&#30003;&#35831;</button><p id=act_status class=muted></p>"
     "<p>userCert <input id=cu type=file accept=.json,application/json><button onclick=\"uploadCert('user',cu)\">&#19978;&#20256;</button></p>"
     "<p>intermediateCert <input id=ci type=file accept=.json,application/json><button onclick=\"uploadCert('intermediate',ci)\">&#19978;&#20256;</button></p>"
     "<p>deviceKey <input id=ck type=file accept=.json,application/json><button onclick=\"uploadCert('devicekey',ck)\">&#19978;&#20256;</button></p></section>"
@@ -314,6 +318,9 @@ static const char k_servers_html[] =
     "function saveFmoSettings(){post('/save',{section:'fmo_identity',fmo_callsign_ssid:fmo_ssid.value,fmo_mqtt_no_local:no_local.checked?1:0})}"
     "async function loadCert(){let s=await(await fetch('/api/fmo/cert',{cache:'no-store'})).json();cert_call.textContent=s.callsign||(s.ready?'--':'\u7b49\u5f85\u5b8c\u6574\u8bc1\u4e66');certstatus.textContent=(s.ready?'READY ':'INCOMPLETE ')+(s.callsign||'')+(s.uid?' / '+s.uid:'')+'\\nuser='+s.user+' intermediate='+s.intermediate+' deviceKey='+s.device_key+(s.error?'\\n'+s.error:'')}"
     "async function uploadCert(kind,input){if(!input.files.length)return;let r=await fetch('/api/fmo/cert/'+kind,{method:'POST',headers:{'Content-Type':'application/json'},body:input.files[0]});if(!r.ok)alert(await r.text());await loadCert()}"
+    "async function loadActivation(){try{let a=await(await fetch('/api/fmo/activate',{cache:'no-store'})).json();act_mac.textContent=a.mac||'--';if(document.activeElement!==act_host)act_host.value=a.host||'';act_status.textContent=a.last||''}catch(e){act_status.textContent='activation status unavailable'}}"
+    "async function activate(saveOnly){act_status.textContent=saveOnly?'saving...':'requesting certificate...';let r=await fetch('/api/fmo/activate',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({cert_host:act_host.value,save_only:saveOnly?1:0})});let t=await r.text();act_status.textContent=t;if(!r.ok)return;await loadActivation();if(!saveOnly)await loadCert()}"
+    "function saveActivateHost(){activate(true)}function runActivate(){activate(false)}"
     "function renderFmo(){if(!data)return;let q=fmo_filter.value.trim().toLowerCase(),list=(data.fmo||[]).filter(x=>!q||[x.name,x.callsign,x.host,x.port,x.uid].join(' ').toLowerCase().includes(q));let mode=fmo_sort.value;if(mode==='favorite')list.sort((a,b)=>(b.favorite-a.favorite)||(b.selected-a.selected));else if(mode==='name')list.sort((a,b)=>a.name.localeCompare(b.name));else if(mode==='online')list.sort((a,b)=>(b.online-a.online)||(b.total-a.total));else if(mode==='total')list.sort((a,b)=>(b.total-a.total)||(b.online-a.online));fmo_count.textContent='\u663e\u793a '+list.length+' / '+(data.fmo||[]).length+' \u4e2a\u670d\u52a1\u5668';fmo.innerHTML='';"
     "function cell(r,t){let c=r.insertCell();c.textContent=t;return c}function button(c,t,fn){let b=document.createElement('button');b.textContent=t;b.onclick=fn;c.appendChild(b)}"
     "list.forEach(x=>{let r=fmo.insertRow();r.className=x.selected?'sel':'';let c=r.insertCell(),favbox=document.createElement('input');favbox.type='checkbox';favbox.checked=x.favorite;favbox.onchange=()=>fav(x.key,favbox.checked);c.appendChild(favbox);let cs=x.callsign+(x.has_ssid?'-'+x.ssid:'');cell(r,x.name+' / '+cs+(x.uid?' / '+x.uid:''));cell(r,x.host+':'+x.port);cell(r,x.online+'/'+x.total);let bc=r.insertCell();button(bc,x.selected?'\u5f53\u524d':'\u9009\u62e9',()=>selectServer('fmo',x.key));if(x.selected)bc.firstChild.disabled=true});if(!list.length)fmo.innerHTML='<tr><td colspan=5 class=muted>\u6ca1\u6709\u5339\u914d\u7684\u670d\u52a1\u5668</td></tr>'}"
@@ -325,7 +332,7 @@ static const char k_servers_html[] =
     "async function loadQso(){try{let d=await(await fetch('/api/qso',{cache:'no-store'})).json();"
     "qso_state.textContent=d.phase+(d.peer?' / '+d.peer:'')+(d.detail?' -- '+d.detail:'');"
     "qso_log.innerHTML='';(d.log||[]).forEach(x=>{qso_log.innerHTML+='<tr><td>'+new Date(x.ts*1000).toLocaleString()+'</td><td>'+(x.dir==='in'?'&larr;':'&rarr;')+'</td><td>'+esc(x.peer)+(x.uid?' / '+x.uid:'')+'</td><td>'+esc(x.result)+'</td><td>'+esc(x.comment||'')+'</td></tr>'})}catch(e){}}"
-    "load();loadCert();loadQso();setInterval(loadQso,3000)</script></body></html>";
+    "load();loadCert();loadActivation();loadQso();setInterval(loadQso,3000)</script></body></html>";
 
 static const char k_update_html[] =
     "<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -1462,8 +1469,66 @@ static esp_err_t fmo_cert_post(httpd_req_t *request)
                                    esp_err_to_name(error));
     }
     sync_fmo_callsign_from_certificate();
+    fmo_link_request_certificate_refresh();
     httpd_resp_set_type(request, "application/json");
     return httpd_resp_sendstr(request, "{\"ok\":true}");
+}
+
+static esp_err_t fmo_activate_get(httpd_req_t *request)
+{
+    char host[FMO_ACTIVATE_HOST_MAX + 1] = "";
+    char last[128] = "";
+    char escaped_host[(FMO_ACTIVATE_HOST_MAX + 1) * 2] = "";
+    char escaped_last[sizeof(last) * 2] = "";
+    uint64_t epoch = 0;
+    uint8_t mac[6] = {};
+    char mac_text[13];
+    fmo_activate_get_host(host, sizeof(host));
+    fmo_activate_get_status(last, sizeof(last), &epoch);
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    snprintf(mac_text, sizeof(mac_text), "%02X%02X%02X%02X%02X%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    json_escape(escaped_host, sizeof(escaped_host), host);
+    json_escape(escaped_last, sizeof(escaped_last), last);
+    char response[512];
+    snprintf(response, sizeof(response),
+             "{\"host\":\"%s\",\"mac\":\"%s\",\"last\":\"%s\","
+             "\"last_epoch\":%llu}", escaped_host, mac_text, escaped_last,
+             (unsigned long long)epoch);
+    httpd_resp_set_type(request, "application/json");
+    return httpd_resp_sendstr(request, response);
+}
+
+static esp_err_t fmo_activate_post(httpd_req_t *request)
+{
+    char *body = receive_small_form(request);
+    if (body == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "invalid activation request");
+    }
+    char host[FMO_ACTIVATE_HOST_MAX + 1] = "";
+    char save_value[8] = "";
+    const bool has_host = form_value(body, "cert_host", host, sizeof(host));
+    const bool save_only = form_value(body, "save_only", save_value,
+                                      sizeof(save_value)) &&
+                           strcmp(save_value, "1") == 0;
+    if (has_host && host[0] != '\0' && !fmo_activate_set_host(host)) {
+        free(body);
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "invalid certificate server host");
+    }
+    free(body);
+    if (save_only) return httpd_resp_sendstr(request, "certificate server saved");
+    char message[160] = "";
+    esp_err_t error = fmo_activate_run(message, sizeof(message));
+    if (error != ESP_OK) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   message[0] != '\0' ? message :
+                                   "certificate activation failed");
+    }
+    sync_fmo_callsign_from_certificate();
+    fmo_link_request_certificate_refresh();
+    return httpd_resp_sendstr(request, message);
 }
 
 static int compare_ap_rssi(const void *left, const void *right)
@@ -1812,8 +1877,8 @@ esp_err_t web_portal_start(void)
 {
     sync_fmo_callsign_from_certificate();
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    /* Keep headroom for new API routes; the portal currently registers 28. */
-    config.max_uri_handlers = 32;
+    /* Keep headroom for optional FMO certificate activation routes. */
+    config.max_uri_handlers = 36;
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.recv_wait_timeout = 30;
     /* Captive-portal probes can arrive while configuration handlers are
@@ -1863,6 +1928,10 @@ esp_err_t web_portal_start(void)
         {.uri = "/api/fmo/cert/devicekey", .method = HTTP_POST,
          .handler = fmo_cert_post,
          .user_ctx = (void *)(intptr_t)FMO_CERT_DEVICE_KEY},
+        {.uri = "/api/fmo/activate", .method = HTTP_GET,
+         .handler = fmo_activate_get},
+        {.uri = "/api/fmo/activate", .method = HTTP_POST,
+         .handler = fmo_activate_post},
         {.uri = "/update", .method = HTTP_GET, .handler = update_get},
         {.uri = "/update", .method = HTTP_POST, .handler = firmware_upload_post},
         {.uri = "/ota/status", .method = HTTP_GET, .handler = ota_status_get},

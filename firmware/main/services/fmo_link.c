@@ -48,6 +48,11 @@ static char s_configured_callsign[16] = "NOCALL";
 static uint16_t s_client_suffix;
 static int64_t s_voice_until_us;
 static bool s_recreate_client;
+/* Certificate validation reads SPIFFS, which disables the flash/PSRAM cache.
+ * Keep the result here so the PSRAM-backed audio task never performs that
+ * operation while opening an FMO uplink. */
+static fmo_identity_status_t s_identity;
+static bool s_identity_refresh_requested;
 
 #define TX_PACKETS_PER_FRAME 6U
 static bool s_tx_active;
@@ -116,6 +121,26 @@ static bool topic_is_raw(const esp_mqtt_event_t *event)
            memcmp(event->topic, topic, sizeof(topic) - 1) == 0;
 }
 
+static void refresh_identity_cache(void)
+{
+    fmo_identity_status_t identity = {0};
+    if (fmo_cert_store_status(&identity) != ESP_OK) {
+        memset(&identity, 0, sizeof(identity));
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_identity = identity;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static fmo_identity_status_t identity_cache_get(void)
+{
+    fmo_identity_status_t identity;
+    portENTER_CRITICAL(&s_lock);
+    identity = s_identity;
+    portEXIT_CRITICAL(&s_lock);
+    return identity;
+}
+
 /* QSO record topic FMO/QSO/UID/<uid>: the peer publishes its side of an
  * established QSO here; payloads are small JSON documents. */
 #define QSO_RECORD_MAX_SIZE 2048U
@@ -175,8 +200,8 @@ static void mqtt_event(void *argument, esp_event_base_t base,
          * count for the STATION broadcast. */
         esp_mqtt_client_subscribe(event->client, "FMO/LATE/UID_V1/#", 0);
         /* Peer QSO records addressed to this device. */
-        fmo_identity_status_t identity;
-        if (fmo_cert_store_status(&identity) == ESP_OK && identity.ready) {
+        fmo_identity_status_t identity = identity_cache_get();
+        if (identity.ready) {
             char qso_topic[40];
             snprintf(qso_topic, sizeof(qso_topic), "FMO/QSO/UID/%lu",
                      (unsigned long)identity.uid);
@@ -330,8 +355,8 @@ static esp_err_t start_client(const fmo_server_t *server)
      * key for this boot).  Compare base callsigns only — the server list may
      * carry an "-SSID" suffix while the certificate never does. */
     const char *role = "user";
-    fmo_identity_status_t identity;
-    if (fmo_cert_store_status(&identity) == ESP_OK && identity.ready &&
+    fmo_identity_status_t identity = identity_cache_get();
+    if (identity.ready &&
         fmo_aprs_base_callsign_eq(identity.callsign, server->callsign)) {
         portENTER_CRITICAL(&s_lock);
         const bool super_denied =
@@ -410,6 +435,12 @@ static void control_task(void *argument)
 {
     (void)argument;
     for (;;) {
+        bool refresh_identity;
+        portENTER_CRITICAL(&s_lock);
+        refresh_identity = s_identity_refresh_requested;
+        s_identity_refresh_requested = false;
+        portEXIT_CRITICAL(&s_lock);
+        if (refresh_identity) refresh_identity_cache();
         if (s_voice_until_us != 0 && esp_timer_get_time() > s_voice_until_us) {
             portENTER_CRITICAL(&s_lock);
             s_status.receiving = false;
@@ -463,6 +494,9 @@ esp_err_t fmo_link_start(const fmo_config_t *config)
                  config->fmo_callsign);
         s_no_local = config->fmo_mqtt_no_local;
     }
+    /* The control task performs this flash-backed validation before it can
+     * connect.  The audio task consumes only the resulting RAM cache. */
+    s_identity_refresh_requested = true;
     s_raw = malloc(RAW_MAX_SIZE);
     if (s_raw == NULL) return ESP_ERR_NO_MEM;
     s_opus_decoder = opus_voice_decoder_open_ex(8000, 40);
@@ -498,6 +532,15 @@ void fmo_link_update_config(const fmo_config_t *config)
         s_no_local = config->fmo_mqtt_no_local;
         s_recreate_client = true;
     }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void fmo_link_request_certificate_refresh(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_identity_refresh_requested = true;
+    /* New credentials take effect only after reconnecting. */
+    s_recreate_client = true;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -556,7 +599,7 @@ static bool tx_encode_packet(void)
 
 bool fmo_link_tx_begin(void)
 {
-    fmo_identity_status_t identity;
+    fmo_identity_status_t identity = identity_cache_get();
     fmo_link_status_t link;
     char configured_callsign[sizeof(s_configured_callsign)];
     fmo_link_get_status(&link);
@@ -564,8 +607,11 @@ bool fmo_link_tx_begin(void)
     strlcpy(configured_callsign, s_configured_callsign,
             sizeof(configured_callsign));
     portEXIT_CRITICAL(&s_lock);
-    if (!link.connected ||
-        fmo_cert_store_status(&identity) != ESP_OK || !identity.ready) {
+    time_t now = time(NULL);
+    if (!link.connected || !identity.ready ||
+        (now >= 1700000000 &&
+         ((uint64_t)now < identity.issued_at ||
+          (uint64_t)now >= identity.expires_at))) {
         return false;
     }
     if (configured_callsign[0] == '\0' ||

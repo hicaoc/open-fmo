@@ -26,6 +26,7 @@ idf_component_register(
         "services/fmo_protocol.c"
         "services/fmo_frame.c"
         "services/fmo_link.c"
+        "services/fmo_activate.c"
         "services/fmo_cert_store.c"
         "services/fmo_qso.c"
         "services/fmo_aprs.c"
