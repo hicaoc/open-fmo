@@ -40,3 +40,15 @@ esp_err_t fmo_cert_store_build_credentials(const fmo_server_t *server,
                                            size_t username_size,
                                            char **password);
 
+/* Rebuild the canonical 10-element userCert CBOR blob
+ * ["FMO",4,"userCert",issuerSn,callsign,uid,pubKey,iat,exp,signature] from
+ * the stored cert_user.json.  This is the CERT: payload of FMO-V4 APRS
+ * broadcasts; its SHA-256 is the certBlobHash used in signed TBS data. */
+esp_err_t fmo_cert_store_build_cert_blob(uint8_t *out, size_t capacity,
+                                         size_t *out_size);
+
+/* Sign TBS bytes with the device Ed25519 key (cert_devicekey.json).  Fails
+ * while the certificate chain is inconsistent or the userCert is expired. */
+esp_err_t fmo_cert_store_sign(const uint8_t *tbs, size_t tbs_size,
+                              uint8_t signature[64]);
+

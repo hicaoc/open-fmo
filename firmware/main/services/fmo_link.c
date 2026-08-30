@@ -10,6 +10,7 @@
 #include "audio/opus_voice.h"
 #include "esp_log.h"
 #include "esp_random.h"
+#include "services/fmo_aprs.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,6 +20,8 @@
 #include "sodium.h"
 #include "services/fmo_cert_store.h"
 #include "services/fmo_frame.h"
+#include "services/fmo_qso.h"
+#include "services/fmo_station_beacon.h"
 #include "services/network_manager.h"
 #include "services/server_directory.h"
 
@@ -38,10 +41,18 @@ static size_t s_raw_size;
 static size_t s_raw_expected;
 static char s_active_key[FMO_SERVER_KEY_MAX];
 static char s_requested_key[FMO_SERVER_KEY_MAX];
+static char s_pending_key[FMO_SERVER_KEY_MAX];
+static char s_pending_role[8] = "user";
+static char s_super_denied_key[FMO_SERVER_KEY_MAX];
 static char s_configured_callsign[16] = "NOCALL";
 static uint16_t s_client_suffix;
 static int64_t s_voice_until_us;
 static bool s_recreate_client;
+/* Certificate validation reads SPIFFS, which disables the flash/PSRAM cache.
+ * Keep the result here so the PSRAM-backed audio task never performs that
+ * operation while opening an FMO uplink. */
+static fmo_identity_status_t s_identity;
+static bool s_identity_refresh_requested;
 
 #define TX_PACKETS_PER_FRAME 6U
 static bool s_tx_active;
@@ -110,6 +121,60 @@ static bool topic_is_raw(const esp_mqtt_event_t *event)
            memcmp(event->topic, topic, sizeof(topic) - 1) == 0;
 }
 
+static void refresh_identity_cache(void)
+{
+    fmo_identity_status_t identity = {0};
+    if (fmo_cert_store_status(&identity) != ESP_OK) {
+        memset(&identity, 0, sizeof(identity));
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_identity = identity;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static fmo_identity_status_t identity_cache_get(void)
+{
+    fmo_identity_status_t identity;
+    portENTER_CRITICAL(&s_lock);
+    identity = s_identity;
+    portEXIT_CRITICAL(&s_lock);
+    return identity;
+}
+
+/* QSO record topic FMO/QSO/UID/<uid>: the peer publishes its side of an
+ * established QSO here; payloads are small JSON documents. */
+#define QSO_RECORD_MAX_SIZE 2048U
+static uint8_t s_qso[QSO_RECORD_MAX_SIZE];
+static size_t s_qso_size;
+static size_t s_qso_expected;
+
+static bool topic_is_qso_record(const esp_mqtt_event_t *event)
+{
+    static const char prefix[] = "FMO/QSO/UID/";
+    return event->topic != NULL &&
+           event->topic_len > (int)(sizeof(prefix) - 1) &&
+           memcmp(event->topic, prefix, sizeof(prefix) - 1) == 0;
+}
+
+/* Heartbeat topic FMO/LATE/UID_V1/<uid>: feeds the online roster.  The uid
+ * is the decimal topic tail; uid 0 is a valid device and counts too. */
+static bool topic_is_heartbeat(const esp_mqtt_event_t *event, uint32_t *uid)
+{
+    static const char prefix[] = "FMO/LATE/UID_V1/";
+    if (event->topic == NULL ||
+        event->topic_len <= (int)(sizeof(prefix) - 1) ||
+        memcmp(event->topic, prefix, sizeof(prefix) - 1) != 0) return false;
+    uint32_t value = 0;
+    for (int i = (int)(sizeof(prefix) - 1); i < event->topic_len; ++i) {
+        const char c = event->topic[i];
+        if (c < '0' || c > '9' ||
+            value > (UINT32_MAX - 9U) / 10U) return false;
+        value = value * 10U + (uint32_t)(c - '0');
+    }
+    *uid = value;
+    return true;
+}
+
 static void mqtt_event(void *argument, esp_event_base_t base,
                        int32_t event_id, void *event_data)
 {
@@ -131,22 +196,68 @@ static void mqtt_event(void *argument, esp_event_base_t base,
                      esp_err_to_name(property_error));
         }
         esp_mqtt_client_subscribe(event->client, "FMO/RAW", 0);
+        /* Per-device heartbeats, ~1/min each: source of the auto online
+         * count for the STATION broadcast. */
+        esp_mqtt_client_subscribe(event->client, "FMO/LATE/UID_V1/#", 0);
+        /* Peer QSO records addressed to this device. */
+        fmo_identity_status_t identity = identity_cache_get();
+        if (identity.ready) {
+            char qso_topic[40];
+            snprintf(qso_topic, sizeof(qso_topic), "FMO/QSO/UID/%lu",
+                     (unsigned long)identity.uid);
+            esp_mqtt_client_subscribe(event->client, qso_topic, 0);
+        }
         portENTER_CRITICAL(&s_lock);
         s_status.connected = true;
         s_status.last_error = ESP_OK;
+        /* The SAS accepted this connection: record the role it was made
+         * with.  The STATION broadcast gate reads exactly this value (the
+         * role the broker granted), never a guess. */
+        snprintf(s_status.role, sizeof(s_status.role), "%s", s_pending_role);
         portEXIT_CRITICAL(&s_lock);
-        ESP_LOGI(TAG, "connected and subscribed FMO/RAW (No Local=%u)",
-                 no_local ? 1u : 0u);
+        ESP_LOGI(TAG, "connected and subscribed FMO/RAW + FMO/LATE/UID_V1/# "
+                 "(No Local=%u, role=%s)",
+                 no_local ? 1u : 0u, s_pending_role);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
+        fmo_station_clear_online();
         portENTER_CRITICAL(&s_lock);
         s_status.connected = false;
         s_status.receiving = false;
+        s_status.role[0] = '\0';
         if (s_status.last_error == ESP_OK) {
                 s_status.last_error = ESP_FAIL;
         }
         s_recreate_client = true;
         portEXIT_CRITICAL(&s_lock);
     } else if (event_id == MQTT_EVENT_DATA) {
+        uint32_t uid;
+        if (topic_is_heartbeat(event, &uid)) {
+            fmo_station_note_uid(uid);
+            return;
+        }
+        if (topic_is_qso_record(event)) {
+            if (event->current_data_offset == 0) {
+                s_qso_size = 0;
+                s_qso_expected = event->total_data_len > 0 &&
+                                 event->total_data_len <= QSO_RECORD_MAX_SIZE
+                    ? (size_t)event->total_data_len : 0;
+            }
+            if (s_qso_expected == 0 || event->data_len <= 0 ||
+                (size_t)event->current_data_offset != s_qso_size ||
+                s_qso_size + (size_t)event->data_len > s_qso_expected) {
+                s_qso_expected = 0;
+                s_qso_size = 0;
+                return;
+            }
+            memcpy(s_qso + s_qso_size, event->data, (size_t)event->data_len);
+            s_qso_size += (size_t)event->data_len;
+            if (s_qso_size == s_qso_expected) {
+                fmo_qso_handle_mqtt_record((const char *)s_qso, s_qso_size);
+                s_qso_expected = 0;
+                s_qso_size = 0;
+            }
+            return;
+        }
         if (!topic_is_raw(event)) return;
         if (event->current_data_offset == 0) {
             s_raw_size = 0;
@@ -170,8 +281,19 @@ static void mqtt_event(void *argument, esp_event_base_t base,
             s_raw_size = 0;
         }
     } else if (event_id == MQTT_EVENT_ERROR && event->error_handle != NULL) {
+        const int return_code = event->error_handle->connect_return_code;
         portENTER_CRITICAL(&s_lock);
         s_status.last_error = ESP_FAIL;
+        if ((return_code == 4 || return_code == 5) &&
+            strcmp(s_pending_role, "super") == 0 &&
+            s_pending_key[0] != '\0') {
+            /* SAS rejected "super" on our own server: remember it and let
+             * the reconnect fall back to "user".  "admin" is deliberately
+             * not tried -- it is unverified whether admin may broadcast, so
+             * it is not treated as super (open point). */
+            strlcpy(s_super_denied_key, s_pending_key,
+                    sizeof(s_super_denied_key));
+        }
         portEXIT_CRITICAL(&s_lock);
         ESP_LOGW(TAG, "MQTT error type=%d return=%d socket=%d",
                  event->error_handle->error_type,
@@ -194,6 +316,7 @@ static void stop_client(void)
     portENTER_CRITICAL(&s_lock);
     s_status.connected = false;
     s_status.receiving = false;
+    s_status.role[0] = '\0';
     s_recreate_client = false;
     portEXIT_CRITICAL(&s_lock);
 }
@@ -223,11 +346,28 @@ static esp_err_t start_client(const fmo_server_t *server)
              server->name);
     snprintf(s_status.server_callsign, sizeof(s_status.server_callsign), "%s",
              server->callsign);
+    s_status.role[0] = '\0';
     portEXIT_CRITICAL(&s_lock);
+    /* Own-server detection: the operator's own FMO server carries the same
+     * callsign as the userCert.  Only there can the account hold the "super"
+     * role (required for the FMO-V4 STATION broadcast), so try "super" first
+     * and fall back to "user" once the SAS rejects it (remembered per server
+     * key for this boot).  Compare base callsigns only — the server list may
+     * carry an "-SSID" suffix while the certificate never does. */
+    const char *role = "user";
+    fmo_identity_status_t identity = identity_cache_get();
+    if (identity.ready &&
+        fmo_aprs_base_callsign_eq(identity.callsign, server->callsign)) {
+        portENTER_CRITICAL(&s_lock);
+        const bool super_denied =
+            strcmp(s_super_denied_key, server->key) == 0;
+        portEXIT_CRITICAL(&s_lock);
+        if (!super_denied) role = "super";
+    }
     char username[16], client_id[48];
     char *password = NULL;
     esp_err_t error = fmo_cert_store_build_credentials(
-        server, "user", username, sizeof(username), &password);
+        server, role, username, sizeof(username), &password);
     if (error != ESP_OK) {
         portENTER_CRITICAL(&s_lock);
         s_status.last_error = error;
@@ -238,6 +378,8 @@ static esp_err_t start_client(const fmo_server_t *server)
              (unsigned long)server->uid, (unsigned)s_client_suffix);
     portENTER_CRITICAL(&s_lock);
     snprintf(s_status.client_id, sizeof(s_status.client_id), "%s", client_id);
+    snprintf(s_pending_role, sizeof(s_pending_role), "%s", role);
+    snprintf(s_pending_key, sizeof(s_pending_key), "%s", server->key);
     portEXIT_CRITICAL(&s_lock);
     esp_mqtt_client_config_t mqtt_config = {
         .broker.address.hostname = server->host,
@@ -251,7 +393,10 @@ static esp_err_t start_client(const fmo_server_t *server)
         .network.reconnect_timeout_ms = 10000,
         .network.timeout_ms = 10000,
         .network.disable_auto_reconnect = true,
-        .task.stack_size = 8192,
+        /* Incoming voice runs Opus/SILK decode + a 960-sample PCM buffer on
+         * the mqtt_task stack (MQTT_DATA -> process_raw -> decode_block);
+         * 6144 overflowed in silk_decode_core. */
+        .task.stack_size = 10240,
         .buffer.size = RAW_MAX_SIZE,
         .buffer.out_size = RAW_MAX_SIZE,
         .outbox.limit = 16U * 1024U,
@@ -281,8 +426,8 @@ static esp_err_t start_client(const fmo_server_t *server)
     }
     xSemaphoreGive(s_client_mutex);
     snprintf(s_active_key, sizeof(s_active_key), "%s", server->key);
-    ESP_LOGI(TAG, "connecting %s (%s:%u, client id=%s)", server->name,
-             server->host, (unsigned)server->port, client_id);
+    ESP_LOGI(TAG, "connecting %s (%s:%u, client id=%s, role=%s)", server->name,
+             server->host, (unsigned)server->port, client_id, role);
     return ESP_OK;
 }
 
@@ -290,6 +435,12 @@ static void control_task(void *argument)
 {
     (void)argument;
     for (;;) {
+        bool refresh_identity;
+        portENTER_CRITICAL(&s_lock);
+        refresh_identity = s_identity_refresh_requested;
+        s_identity_refresh_requested = false;
+        portEXIT_CRITICAL(&s_lock);
+        if (refresh_identity) refresh_identity_cache();
         if (s_voice_until_us != 0 && esp_timer_get_time() > s_voice_until_us) {
             portENTER_CRITICAL(&s_lock);
             s_status.receiving = false;
@@ -343,6 +494,9 @@ esp_err_t fmo_link_start(const fmo_config_t *config)
                  config->fmo_callsign);
         s_no_local = config->fmo_mqtt_no_local;
     }
+    /* The control task performs this flash-backed validation before it can
+     * connect.  The audio task consumes only the resulting RAM cache. */
+    s_identity_refresh_requested = true;
     s_raw = malloc(RAW_MAX_SIZE);
     if (s_raw == NULL) return ESP_ERR_NO_MEM;
     s_opus_decoder = opus_voice_decoder_open_ex(8000, 40);
@@ -354,7 +508,12 @@ esp_err_t fmo_link_start(const fmo_config_t *config)
         s_raw = NULL;
         return ESP_ERR_NOT_SUPPORTED;
     }
-    return xTaskCreate(control_task, "fmo_link", 8192, NULL, 4, &s_task) ==
+    /* This task reads certificates from SPIFFS, so its stack must stay in
+     * internal RAM while the flash cache is disabled.  Credential generation
+     * (cJSON + libsodium Ed25519) overflowed 8 KB on the ESP-IDF 6.2
+     * toolchain (observed as a stack overflow in fe25519_sq/fe25519_sq2),
+     * so reserve 16 KB like nrl_link. */
+    return xTaskCreate(control_task, "fmo_link", 16384, NULL, 4, &s_task) ==
         pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
@@ -373,6 +532,15 @@ void fmo_link_update_config(const fmo_config_t *config)
         s_no_local = config->fmo_mqtt_no_local;
         s_recreate_client = true;
     }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+void fmo_link_request_certificate_refresh(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_identity_refresh_requested = true;
+    /* New credentials take effect only after reconnecting. */
+    s_recreate_client = true;
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -431,7 +599,7 @@ static bool tx_encode_packet(void)
 
 bool fmo_link_tx_begin(void)
 {
-    fmo_identity_status_t identity;
+    fmo_identity_status_t identity = identity_cache_get();
     fmo_link_status_t link;
     char configured_callsign[sizeof(s_configured_callsign)];
     fmo_link_get_status(&link);
@@ -439,8 +607,11 @@ bool fmo_link_tx_begin(void)
     strlcpy(configured_callsign, s_configured_callsign,
             sizeof(configured_callsign));
     portEXIT_CRITICAL(&s_lock);
-    if (!link.connected ||
-        fmo_cert_store_status(&identity) != ESP_OK || !identity.ready) {
+    time_t now = time(NULL);
+    if (!link.connected || !identity.ready ||
+        (now >= 1700000000 &&
+         ((uint64_t)now < identity.issued_at ||
+          (uint64_t)now >= identity.expires_at))) {
         return false;
     }
     if (configured_callsign[0] == '\0' ||
@@ -492,4 +663,51 @@ void fmo_link_tx_end(void)
     }
     (void)tx_flush();
     s_tx_active = false;
+}
+
+bool fmo_link_get_selected_server(fmo_server_t *server)
+{
+    if (server == NULL) return false;
+    return selected_server(server);
+}
+
+bool fmo_link_connected_to(const char *key)
+{
+    if (key == NULL || key[0] == '\0') return false;
+    portENTER_CRITICAL(&s_lock);
+    const bool connected = s_status.connected &&
+                           strcmp(s_active_key, key) == 0;
+    portEXIT_CRITICAL(&s_lock);
+    return connected;
+}
+
+bool fmo_link_jump_to_key(const char *key)
+{
+    if (key == NULL || fmo_server_directory_find(key) == SIZE_MAX) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_lock);
+    if (strcmp(s_requested_key, key) != 0) {
+        s_status.last_error = ESP_OK;
+    }
+    snprintf(s_requested_key, sizeof(s_requested_key), "%s", key);
+    portEXIT_CRITICAL(&s_lock);
+    ESP_LOGI(TAG, "QSO jump: switching to server %s (runtime only)", key);
+    return true;
+}
+
+bool fmo_link_publish(const char *topic, const char *payload, int length)
+{
+    if (topic == NULL || payload == NULL || length <= 0 ||
+        s_client_mutex == NULL) return false;
+    bool connected;
+    portENTER_CRITICAL(&s_lock);
+    connected = s_status.connected;
+    portEXIT_CRITICAL(&s_lock);
+    if (!connected) return false;
+    xSemaphoreTake(s_client_mutex, portMAX_DELAY);
+    const bool published = s_client != NULL &&
+        esp_mqtt_client_publish(s_client, topic, payload, length, 0, 0) >= 0;
+    xSemaphoreGive(s_client_mutex);
+    return published;
 }

@@ -35,6 +35,27 @@ void aprs_service_get_status(aprs_status_t *status);
 size_t aprs_service_get_recent(aprs_recent_packet_t *packets, size_t capacity);
 bool aprs_service_send_beacon_now(void);
 
+/* True once APRS-IS answered the login with "# logresp ... verified".
+ * Transmission of any kind is allowed only in this state. */
+bool aprs_service_is_verified(void);
+
+/* APRS ddmm.mmmmH coordinate formatter, shared with the FMO-V4 station
+ * broadcast so the on-wire position prefix and the signed TBS strings stay
+ * byte-identical. */
+void aprs_service_format_coord(int32_t value_e6, bool latitude, char *out,
+                               size_t size);
+
+/* Send one FMO-V4 packet on the verified APRS-IS connection: source is the
+ * FMO callsign(-SSID), destination APFMO4 via TCPIP*, body is the "=<lat>F
+ * <lon>Ei" position prefix followed by `comment` (e.g. "FMO-V4,STATION,...").
+ * Returns false while the link is down, unverified, or position-less. */
+bool aprs_service_send_fmo_v4_packet(const char *comment);
+
+/* Generic variant with an explicit TOCALL (APFMO1/2/4) and a caller-built
+ * body (everything after ':', e.g. "><UTF-8 text>" for the status frames).
+ * Same connection gates as aprs_service_send_fmo_v4_packet(). */
+bool aprs_service_send_fmo_v4_frame(const char *tocall, const char *body);
+
 /* Accept WGS-84 decimal degrees (31.8885, 118.8141) or APRS/NMEA
  * degrees+minutes (3153.3100N, 11848.8460E). Hemisphere is optional; a
  * leading minus sign selects south/west. The result is normalized to signed

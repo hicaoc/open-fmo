@@ -4,7 +4,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 
-#define FMO_CONFIG_SCHEMA_VERSION 16
+#define FMO_CONFIG_SCHEMA_VERSION 19
 #define FMO_WIFI_PROFILE_MAX 5
 
 /* ES8311 volume limits: mic (ADC) defaults to 160 and caps at 170;
@@ -94,6 +94,34 @@ typedef struct {
     uint8_t fmo_callsign_ssid;
     bool es8311_hp_drive; /* REG13 HPSW: enable headphone output driver */
     bool fmo_mqtt_no_local; /* MQTT 5 No Local; disable only for loopback debugging */
+    /* FMO-V4 STATION broadcast of the operator's own server (schema 17).
+     * online/peak: 0 = automatic (FMO/LATE/UID_V1 heartbeat roster count
+     * and its NVS-persisted peak), >0 = manual override; the country code
+     * is operator-filled (no GeoIP). */
+    bool fmo_station_beacon_enabled;
+    uint8_t fmo_station_beacon_interval_min; /* 5/10/60 minutes */
+    /* UTF-8 station name, sent on the wire as-is (protocol spec).  97 bytes
+     * hold 32 CJK chars (32 x 3 UTF-8 bytes + NUL), matching the original
+     * FMO 32-char limit; schema 18 widened this from 49 bytes (~16 CJK
+     * chars). */
+    char fmo_station_name[97];
+    char fmo_country[3];        /* 2-letter country code, operator-filled */
+    uint16_t fmo_coverage_km;
+    uint16_t fmo_station_online;
+    uint16_t fmo_station_peak;
+    /* FMO-V4 personal BEACON + APRS personal message + server login notice
+     * (schema 19).  All text is stored UTF-8 and sent on the wire as-is:
+     * rig/ant hold 16 chars (16 x 3 UTF-8 bytes + NUL), aprs_msg 64
+     * chars, notice/qso_msg 128 chars.  fmo_freq_x10000 is the beacon
+     * frequency in MHz x 10000 (0 = unset, send gate stays closed). */
+    bool fmo_beacon_enabled;
+    char fmo_rig[49];
+    uint32_t fmo_freq_x10000;
+    char fmo_ant[49];
+    uint16_t fmo_height_m;
+    char fmo_aprs_msg[193];  /* APFMO2 message, sent after each BEACON */
+    char fmo_notice[385];    /* APFMO1 server login notice, sent after STATION */
+    char fmo_qso_msg[385];   /* stored only, never sent (wire format TBD) */
 } fmo_config_t;
 
 esp_err_t config_store_init(void);

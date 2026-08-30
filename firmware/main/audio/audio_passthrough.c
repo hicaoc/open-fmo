@@ -42,12 +42,16 @@ static const char *TAG = "audio_pt";
 
 static TaskHandle_t s_task;
 static StaticTask_t s_task_tcb;
-static StackType_t s_task_stack[32768 / sizeof(StackType_t)];
+/* The audio task does not perform flash operations, so its large stack can
+ * live in PSRAM and leave internal DRAM available for I2S DMA and Wi-Fi. */
+static EXT_RAM_BSS_ATTR StackType_t s_task_stack[32768 / sizeof(StackType_t)];
 static volatile bool s_running;
 static volatile bool s_task_exited;
 
-/* Circular output queue – keep in internal RAM for audio coherency */
-static DRAM_ATTR int16_t s_queue[OUTPUT_QUEUE_SAMPLES];
+/* Circular output queue – CPU-only (read via queue_pop into a frame buffer;
+ * i2s_channel_write copies from there), so it lives in PSRAM like the FMO
+ * jitter buffer and leaves internal DRAM for stacks and TLS. */
+static EXT_RAM_BSS_ATTR int16_t s_queue[OUTPUT_QUEUE_SAMPLES];
 static size_t s_queue_head;
 static size_t s_queue_tail;
 static size_t s_queue_count;

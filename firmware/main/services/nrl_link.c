@@ -391,9 +391,12 @@ esp_err_t nrl_link_start(const fmo_config_t *config)
     if (s_lock == NULL || s_socket_lock == NULL) return ESP_ERR_NO_MEM;
     s_config = *config;
     s_config_generation = 1;
-    /* 10 KB: AT+READ=123 handler chain (config snapshot + reply temp +
-     * float printf) plus the send packet buffer run on this stack. */
-    return xTaskCreate(link_task, "nrl_link", 10240, NULL, 5, NULL) == pdPASS
+    /* AT+READ=123 runs config/NVS snapshots, OTA/network snapshots, several
+     * newlib float formatters and the reply send path on this task. 10 KB
+     * overflowed on the ESP-IDF 6.2 toolchain when the server sent READ=123;
+     * keep this stack internal (the handler can access flash) and leave enough
+     * headroom for future AT fields. */
+    return xTaskCreate(link_task, "nrl_link", 16384, NULL, 5, NULL) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
 

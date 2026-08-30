@@ -29,17 +29,17 @@
 static const char *TAG = "serial_at";
 
 /* Longest accepted command line (reference uses 288 for RADIOADD).
- * Stack: the heaviest path is AT+READ=123 (fmo_config_t ~740 B +
- * ota snapshot ~480 B + reply_append 1 KB temp), but newlib float
- * printf (%.4f) and the dispatcher/parser locals add far more than
- * the raw buffer sum: 4 KB overflowed in practice, 6 KB works. */
+ * Stack: the heaviest path is AT+READ=123, which runs the same handler
+ * chain as nrl_link (config/NVS snapshots + OTA/network snapshots +
+ * newlib float printf + reply send). 6 KB overflowed on the ESP-IDF 6.2
+ * toolchain; use 16 KB like nrl_link. */
 #define SERIAL_AT_LINE_MAX 288U
-#define SERIAL_AT_STACK_BYTES 6144U
+#define SERIAL_AT_STACK_BYTES 12288U
 
 static StaticTask_t s_tcb;
 /* The stack MUST stay in internal RAM: AT commands trigger NVS flash
  * writes, and a PSRAM stack trips the esp_task_stack_is_sane_cache_disabled()
- * assert while the cache is disabled. 4 KB fits internal DRAM. */
+ * assert while the cache is disabled. */
 static StackType_t s_stack[SERIAL_AT_STACK_BYTES / sizeof(StackType_t)];
 
 /* 1 KB reply object; data (not stack) so PSRAM is safe here. */

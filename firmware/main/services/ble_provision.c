@@ -45,8 +45,10 @@ static const ble_uuid128_t k_nus_tx_uuid =
 
 /* --- State --- */
 static bool s_active;
+static bool s_host_synced;
 static bool s_client_connected;
 static bool s_advertising;
+static bool s_web_client_connected;
 static uint16_t s_conn_handle;
 static uint16_t s_tx_val_handle;
 static char s_cmd_buf[CMD_BUF_SIZE];
@@ -61,9 +63,8 @@ static bool s_wifi_txn;
 static char s_staged_ssid[33];
 static char s_staged_pass[65];
 
-/* Coexistence timers */
-#define BLE_STOP_AFTER_STA_MS   4000U
-static uint32_t s_sta_up_since;
+#define BLE_MIN_FREE_INTERNAL          (40U * 1024U)
+#define BLE_MIN_LARGEST_INTERNAL_BLOCK (12U * 1024U)
 
 static uint32_t now_ms(void)
 {
@@ -312,6 +313,19 @@ static int nus_rx_access(uint16_t conn_handle, uint16_t attr_handle,
     return BLE_ATT_ERR_READ_NOT_PERMITTED;
 }
 
+/* NimBLE requires every characteristic definition to have an access callback,
+ * including notify-only values. Notifications themselves use the value handle
+ * directly, so no ATT operation is accepted here. */
+static int nus_tx_access(uint16_t conn_handle, uint16_t attr_handle,
+                         struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)ctxt;
+    (void)arg;
+    return BLE_ATT_ERR_READ_NOT_PERMITTED;
+}
+
 static const struct ble_gatt_svc_def k_gatt_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -326,8 +340,9 @@ static const struct ble_gatt_svc_def k_gatt_svcs[] = {
             {
                 /* TX: device notifies responses here */
                 .uuid = &k_nus_tx_uuid.u,
-                .access_cb = NULL,
-                .flags = BLE_GATT_CHR_F_NOTIFY | BLE_GATT_CHR_F_READ,
+                .access_cb = nus_tx_access,
+                .val_handle = &s_tx_val_handle,
+                .flags = BLE_GATT_CHR_F_NOTIFY,
             },
             {0},
         },
@@ -373,13 +388,16 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
 static void start_advertising(void)
 {
-    if (s_advertising || s_client_connected) return;
+    if (!s_host_synced || s_advertising || s_client_connected ||
+        s_web_client_connected) return;
 
     struct ble_gap_adv_params params = {0};
     params.conn_mode = BLE_GAP_CONN_MODE_UND;
     params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    params.itvl_min = 0x20;
-    params.itvl_max = 0x40;
+    /* 100-150 ms is still discovered quickly, without monopolizing RF time
+     * needed by the provisioning SoftAP's DHCP exchange. */
+    params.itvl_min = 0xa0;
+    params.itvl_max = 0xf0;
 
     int rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                                &params, gap_event, NULL);
@@ -400,37 +418,22 @@ static void ble_host_task(void *param)
 
 static void on_sync(void)
 {
+    s_host_synced = true;
     ble_svc_gap_device_name_set(BLE_DEVICE_NAME);
     start_advertising();
-    ESP_LOGI(TAG, "advertising as %s", BLE_DEVICE_NAME);
+    if (s_advertising) {
+        ESP_LOGI(TAG, "advertising as %s", BLE_DEVICE_NAME);
+    } else if (s_web_client_connected) {
+        ESP_LOGI(TAG, "advertising paused for Web provisioning client");
+    }
 }
 
 static void on_reset(int reason)
 {
     ESP_LOGW(TAG, "host reset reason=%d", reason);
+    s_host_synced = false;
     s_client_connected = false;
     s_advertising = false;
-}
-
-/* --- Coexistence management --- */
-static void manage_coexistence(void)
-{
-    if (!s_active) return;
-    network_status_t net;
-    network_manager_get_status(&net);
-
-    /* Stop BLE permanently once WiFi connects */
-    if (net.station_connected) {
-        uint32_t now = now_ms();
-        if (s_sta_up_since == 0) s_sta_up_since = now;
-        if (!s_client_connected &&
-            (now - s_sta_up_since) >= BLE_STOP_AFTER_STA_MS) {
-            ESP_LOGI(TAG, "WiFi connected, stopping BLE provisioning");
-            ble_provision_stop();
-        }
-    } else {
-        s_sta_up_since = 0;
-    }
 }
 
 /* --- Public API --- */
@@ -439,16 +442,18 @@ esp_err_t ble_provision_start(void)
     if (s_active) return ESP_OK;
 
     ESP_LOGI(TAG, "starting BLE provisioning");
+    s_host_synced = false;
 
-    /* Memory gate: BT controller + NimBLE host need ~64 KB internal DRAM.
-     * Reference project requires >=96 KB free and a contiguous block large
-     * enough for the host task stack + 32 KB headroom. */
+    /* NimBLE allocations use PSRAM in this build. Keep enough internal DRAM
+     * for the controller, host task metadata and Wi-Fi coexistence, without
+     * applying the much larger Bluedroid-oriented safety gate. */
     const size_t free_internal =
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const size_t largest_internal =
         heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (free_internal < 96u * 1024u || largest_internal < 4096u + 32768u) {
-        ESP_LOGW(TAG, "BLE skipped: internal free=%u largest=%u (need >=96K / >=36K)",
+    if (free_internal < BLE_MIN_FREE_INTERNAL ||
+        largest_internal < BLE_MIN_LARGEST_INTERNAL_BLOCK) {
+        ESP_LOGW(TAG, "BLE skipped: internal free=%u largest=%u (need >=40K / >=12K)",
                  (unsigned)free_internal, (unsigned)largest_internal);
         return ESP_ERR_NO_MEM;
     }
@@ -495,10 +500,14 @@ esp_err_t ble_provision_start(void)
     scan_rsp.name_is_complete = 1;
     ble_gap_adv_rsp_set_fields(&scan_rsp);
 
-    nimble_port_freertos_init(ble_host_task);
+    err = nimble_port_freertos_init(ble_host_task);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nimble host task: %s", esp_err_to_name(err));
+        nimble_port_deinit();
+        return err;
+    }
 
     s_active = true;
-    s_sta_up_since = 0;
     return ESP_OK;
 }
 
@@ -511,17 +520,49 @@ void ble_provision_stop(void)
         ble_gap_terminate(s_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
     ble_gap_adv_stop();
-    nimble_port_freertos_deinit();
-    /* Give host task time to exit */
-    vTaskDelay(pdMS_TO_TICKS(100));
-    esp_bt_controller_disable();
-    esp_bt_controller_deinit();
+    int rc = nimble_port_stop();
+    if (rc != 0) {
+        ESP_LOGW(TAG, "nimble stop rc=%d", rc);
+    }
+    esp_err_t err = nimble_port_deinit();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "nimble deinit: %s", esp_err_to_name(err));
+    } else {
+        /* Provisioning is complete. BLE is not restarted until the next boot,
+         * so return its static controller memory to the system as well. */
+        err = esp_bt_controller_mem_release(ESP_BT_MODE_BTDM);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "BT memory release: %s", esp_err_to_name(err));
+        }
+    }
 
     s_active = false;
+    s_host_synced = false;
     s_advertising = false;
     s_client_connected = false;
     s_wifi_txn = false;
     s_tx_val_handle = 0;
+}
+
+void ble_provision_set_web_client_connected(bool connected)
+{
+    if (s_web_client_connected == connected) return;
+    s_web_client_connected = connected;
+    if (!s_active || !s_host_synced) return;
+
+    if (connected) {
+        if (s_advertising) {
+            int rc = ble_gap_adv_stop();
+            if (rc != 0 && rc != BLE_HS_EALREADY) {
+                ESP_LOGW(TAG, "pause advertising rc=%d", rc);
+            }
+        }
+        ESP_LOGI(TAG, "advertising paused; Web provisioning has RF priority");
+    } else {
+        ESP_LOGI(TAG, "Web client left; BLE advertising may resume");
+        /* ble_provision_poll() restarts advertising after the stop-complete
+         * event has updated s_advertising. */
+    }
 }
 
 bool ble_provision_is_active(void)
@@ -531,12 +572,29 @@ bool ble_provision_is_active(void)
 
 void ble_provision_poll(void)
 {
-    manage_coexistence();
-
     if (!s_active) return;
 
+    network_status_t net;
+    network_manager_get_status(&net);
+
+    /* Provisioning ends as soon as the new Wi-Fi profile obtains an IP.
+     * Send the final result while the BLE link still exists, then tear the
+     * stack down even if the phone remains connected. */
+    if (net.station_connected) {
+        if (s_wifi_result_pending) {
+            char line[48];
+            snprintf(line, sizeof(line), "WIFI_STATE=GOT_IP,%s", net.ip_address);
+            send_line(line);
+            s_wifi_result_pending = false;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        ESP_LOGI(TAG, "WiFi connected, provisioning complete; stopping BLE");
+        ble_provision_stop();
+        return;
+    }
+
     /* Restart advertising if disconnected */
-    if (!s_client_connected && !s_advertising) {
+    if (s_host_synced && !s_client_connected && !s_advertising) {
         start_advertising();
     }
 
@@ -544,18 +602,6 @@ void ble_provision_poll(void)
     if (s_scan_pending) {
         s_scan_pending = false;
         if (s_client_connected) do_scan();
-    }
-
-    /* WiFi result notification */
-    if (s_wifi_result_pending) {
-        network_status_t net;
-        network_manager_get_status(&net);
-        if (net.station_connected) {
-            char line[48];
-            snprintf(line, sizeof(line), "WIFI_STATE=GOT_IP,%s", net.ip_address);
-            send_line(line);
-            s_wifi_result_pending = false;
-        }
     }
 
     /* Deferred reboot */
@@ -572,5 +618,6 @@ esp_err_t ble_provision_start(void) { return ESP_ERR_NOT_SUPPORTED; }
 void ble_provision_poll(void) {}
 bool ble_provision_is_active(void) { return false; }
 void ble_provision_stop(void) {}
+void ble_provision_set_web_client_connected(bool connected) { (void)connected; }
 
 #endif /* CONFIG_BT_NIMBLE_ENABLED */

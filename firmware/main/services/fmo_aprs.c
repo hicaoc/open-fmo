@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 
 #include "ff.h"
@@ -107,6 +108,56 @@ static bool gbk_to_utf8(const char *input, char *output, size_t output_size)
             output[used++] = (char)(0xe0 | (codepoint >> 12));
             output[used++] = (char)(0x80 | ((codepoint >> 6) & 0x3f));
             output[used++] = (char)(0x80 | (codepoint & 0x3f));
+        }
+    }
+    output[used] = '\0';
+    return used > 0;
+}
+
+bool fmo_aprs_utf8_to_gbk(const char *input, char *output, size_t output_size)
+{
+    if (input == NULL || output == NULL || output_size == 0) return false;
+    const uint8_t *source = (const uint8_t *)input;
+    size_t used = 0;
+    while (*source != 0) {
+        uint32_t codepoint;
+        if (*source < 0x80) {
+            codepoint = *source++;
+        } else {
+            unsigned needed;
+            if ((*source & 0xe0) == 0xc0) {
+                needed = 1;
+                codepoint = *source & 0x1f;
+            } else if ((*source & 0xf0) == 0xe0) {
+                needed = 2;
+                codepoint = *source & 0x0f;
+            } else {
+                return false;  /* 4-byte UTF-8 has no CP936 mapping */
+            }
+            ++source;
+            for (unsigned i = 0; i < needed; ++i, ++source) {
+                if ((*source & 0xc0) != 0x80) return false;
+                codepoint = (codepoint << 6) | (*source & 0x3f);
+            }
+            if ((needed == 1 && codepoint < 0x80) ||
+                (needed == 2 && codepoint < 0x800)) return false;
+        }
+        if (codepoint < 0x80) {
+            if (used + 2 > output_size) return false;
+            output[used++] = (char)codepoint;
+            continue;
+        }
+        DWORD oem = ff_uni2oem(codepoint, 936);
+        if (oem == 0 || oem > 0xffffu) return false;
+        const size_t required = oem < 0x100 ? 1 : 2;
+        if (used + required + 1 > output_size) return false;
+        if (required == 1) {
+            output[used++] = (char)oem;
+        } else {
+            /* FatFS returns DBCS codes with the lead byte high, matching the
+             * (source[0] << 8) | source[1] form ff_oem2uni() accepts. */
+            output[used++] = (char)(oem >> 8);
+            output[used++] = (char)(oem & 0xff);
         }
     }
     output[used] = '\0';
@@ -231,4 +282,13 @@ bool fmo_aprs_parse_station(const char *line, size_t line_size,
     }
     server->last_seen = (int64_t)time(NULL);
     return true;
+}
+
+bool fmo_aprs_base_callsign_eq(const char *a, const char *b)
+{
+    if (a == NULL || b == NULL) return false;
+    size_t na = 0, nb = 0;
+    while (a[na] != '\0' && a[na] != '-') na++;
+    while (b[nb] != '\0' && b[nb] != '-') nb++;
+    return na > 0 && na == nb && strncasecmp(a, b, na) == 0;
 }

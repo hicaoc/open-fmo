@@ -21,13 +21,14 @@
 #include "services/storage_fs.h"
 
 #define SERVER_MAX 32
-#define FMO_SERVER_MAX 64
+#define FMO_SERVER_MAX 256
 #define CACHE_VERSION 2
 #define RESPONSE_CAPACITY 32768
 #define NRL_CACHE_FILE "nrl_servers.json"
 #define FMO_CACHE_FILE "fmo_servers.json"
 
 static const char *TAG = "servers";
+static void expire_stale_fmo_servers(void);
 static StaticTask_t s_refresh_tcb;
 static StackType_t s_refresh_stack[16384 / sizeof(StackType_t)];
 static const char *SERVER_API = "https://www.nrlptt.com/api/platform-servers";
@@ -478,6 +479,7 @@ static void refresh_task(void *argument)
 {
     (void)argument;
     while (true) {
+        expire_stale_fmo_servers();
         (void)fmo_server_directory_flush();
         network_status_t network = {0};
         network_manager_get_status(&network);
@@ -634,6 +636,45 @@ const fmo_server_t *fmo_server_directory_get_favorite(size_t favorite_index)
     return NULL;
 }
 
+/* Non-favorite servers with no STATION beacon for this long are expired by
+ * the periodic sweep (favorites are kept forever). */
+#define FMO_SERVER_STALE_SEC (7U * 24U * 3600U)
+
+/* Drop non-favorite servers unheard from for FMO_SERVER_STALE_SEC.  Skipped
+ * while the clock is not yet synced (early boot before NTP): with last_seen
+ * persisted across reboots, a long power-off would otherwise wipe the whole
+ * list before the feed can refresh it.  Surviving entries are copied to the
+ * inactive list like upsert does, so readers holding pointers into the old
+ * active list keep seeing valid memory. */
+static void expire_stale_fmo_servers(void)
+{
+    const time_t now = time(NULL);
+    if (now < (time_t)1700000000 || s_lock == NULL) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    unsigned active = s_fmo_active;
+    unsigned next = active ^ 1U;
+    size_t count = s_fmo_counts[active];
+    size_t kept = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const fmo_server_t *server = &s_fmo_lists[active][i];
+        if (!server->favorite &&
+            now - (time_t)server->last_seen > (time_t)FMO_SERVER_STALE_SEC) {
+            continue;
+        }
+        s_fmo_lists[next][kept++] = *server;
+    }
+    if (kept != count) {
+        ESP_LOGI(TAG, "expired %u stale FMO servers (last beacon > %u days)",
+                 (unsigned)(count - kept),
+                 (unsigned)(FMO_SERVER_STALE_SEC / 86400U));
+        s_fmo_counts[next] = kept;
+        s_fmo_active = next;
+        ++s_fmo_generation;
+        s_fmo_dirty = true;
+    }
+    xSemaphoreGive(s_lock);
+}
+
 esp_err_t fmo_server_directory_upsert(const fmo_server_t *server)
 {
     if (server == NULL || server->key[0] == '\0' || server->host[0] == '\0' ||
@@ -653,10 +694,28 @@ esp_err_t fmo_server_directory_upsert(const fmo_server_t *server)
     }
     if (index == count) {
         if (count >= FMO_SERVER_MAX) {
-            xSemaphoreGive(s_lock);
-            return ESP_ERR_NO_MEM;
+            /* Full: evict the stalest non-favorite entry (by last_seen, the
+             * time of its last STATION beacon) so new discoveries replace
+             * servers that stopped broadcasting.  Favorites and recently
+             * seen servers (which includes the selected one while it is
+             * online) are never evicted. */
+            size_t oldest = SIZE_MAX;
+            for (size_t i = 0; i < count; ++i) {
+                if (s_fmo_lists[next][i].favorite) continue;
+                if (oldest == SIZE_MAX ||
+                    s_fmo_lists[next][i].last_seen <
+                        s_fmo_lists[next][oldest].last_seen) {
+                    oldest = i;
+                }
+            }
+            if (oldest == SIZE_MAX) {
+                xSemaphoreGive(s_lock);
+                return ESP_ERR_NO_MEM;
+            }
+            index = oldest;
+        } else {
+            ++count;
         }
-        ++count;
     }
     bool favorite = index < s_fmo_counts[active]
         ? s_fmo_lists[next][index].favorite : false;

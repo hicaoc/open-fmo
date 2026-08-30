@@ -12,6 +12,18 @@ typedef enum {
     APP_UI_DETAIL,
 } app_ui_page_t;
 
+typedef enum {
+    APP_UI_MENU_SERVERS,
+    APP_UI_MENU_RADIO,
+    APP_UI_MENU_AUDIO,
+    APP_UI_MENU_APRS,
+    APP_UI_MENU_ESPNOW,
+    APP_UI_MENU_NET_RADIO,
+    APP_UI_MENU_OTA,
+    APP_UI_MENU_LANGUAGE,
+    APP_UI_MENU_COUNT,
+} app_ui_menu_t;
+
 typedef struct {
     app_ui_page_t page;
     size_t server_index;
@@ -36,14 +48,17 @@ typedef struct {
     bool espnow_change_pending;
     bool aprs_enabled;
     bool aprs_change_pending;
-    uint8_t radio_adjust_field;  /* 0=RX, 1=TX, 2=SQL, 3=PWR */
-    uint8_t ctcss_adjust_field;  /* 0=RX, 1=TX */
+    uint8_t radio_adjust_field;  /* RF detail selected field (0-9) */
     uint8_t audio_adjust_field;  /* audio detail selected field (0-6) */
     /* 0=APRS-IS, 1=RF RX, 2=RF TX, 3=NRL RX, 4=NRL TX,
      * 5=RF>IS, 6=IS>RF, 7=NRL>IS, 8=IS>NRL, 9=RF>NRL, 10=NRL>RF */
     uint8_t aprs_adjust_field;
+    bool ota_install_confirm;
 } app_ui_t;
 
 void app_ui_init(app_ui_t *ui);
 void app_ui_handle(app_ui_t *ui, encoder_event_type_t event);
+/* Flushes deferred screen edits after the knob has been idle.  Returns true
+ * when the save indicator changed and the screen should be redrawn. */
+bool app_ui_poll(void);
 void app_ui_render(const app_ui_t *ui, gfx_canvas_t *canvas);

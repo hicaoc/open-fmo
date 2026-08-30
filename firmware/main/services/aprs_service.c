@@ -20,6 +20,7 @@
 #include "audio/aprs_afsk.h"
 #include "esp_attr.h"
 #include "services/app_notice.h"
+#include "services/fmo_qso.h"
 #include "services/network_manager.h"
 
 #define APRS_RECONNECT_MS 30000U
@@ -28,9 +29,12 @@
 
 static const char *TAG = "aprs";
 static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_tx_lock;
 static fmo_config_t s_config;
 static uint32_t s_generation;
 static bool s_connected;
+static bool s_verified;
+static int s_fd = -1;
 static bool s_send_now;
 static uint32_t s_rx_count;
 static uint32_t s_tx_count;
@@ -42,7 +46,10 @@ static size_t s_recent_count;
  * PSRAM.  Keeping it out of internal DRAM is important after Wi-Fi, the web
  * portal, and the AFSK decoder have started on the 2 MB-PSRAM target. */
 static StaticTask_t s_task_tcb;
-static EXT_RAM_BSS_ATTR StackType_t s_task_stack[8192 / sizeof(StackType_t)];
+/* The task keeps the full config plus RX/AFSK line buffers on its frame, and
+ * send_beacon() -> send_line() adds another ~1.6 KB when APRS-IS becomes
+ * verified.  Reserve 16 KB in PSRAM for the forwarding and FMO-V4 paths. */
+static EXT_RAM_BSS_ATTR StackType_t s_task_stack[16384 / sizeof(StackType_t)];
 
 static uint32_t now_ms(void)
 {
@@ -302,7 +309,9 @@ static void format_coord(int32_t value_e6, bool latitude, char *out, size_t size
 static bool send_line(int fd, const char *line)
 {
     size_t length = strlen(line);
-    char wire[420];
+    /* FMO-V4 STATION packets run 400-600 bytes (CERT + SIG base64url), so
+     * the wire buffer must cover the largest line this service can emit. */
+    char wire[1024];
     if (length + 3 > sizeof(wire)) return false;
     memcpy(wire, line, length);
     wire[length++] = '\r';
@@ -441,7 +450,10 @@ static bool fwd_to_is(int fd, const char *line, const char *call)
     char fwd[440];
     snprintf(fwd, sizeof(fwd), "%.*s,qAR,%s%s",
              (int)(colon - line), line, call, colon);
-    return send_line(fd, fwd);
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    bool sent = send_line(fd, fwd);
+    xSemaphoreGive(s_tx_lock);
+    return sent;
 }
 
 /* Inject a TNC2 line into the AFSK TX queue (out over whatever routes are
@@ -519,6 +531,15 @@ static bool send_beacon(int fd, const fmo_config_t *config)
         ESP_LOGW(TAG, "beacon blocked: fixed position is not configured");
         return false;
     }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool verified = s_verified;
+    xSemaphoreGive(s_lock);
+    if (!verified) {
+        /* Listen-Only until "# logresp ... verified" arrives, mirroring the
+         * reference firmware: an unverified login may receive but not send. */
+        ESP_LOGW(TAG, "beacon blocked: APRS-IS login not verified yet");
+        return false;
+    }
     char call[16], lat[12], lon[13], line[360];
     own_callsign(config, call, sizeof(call));
     format_coord(config->aprs_latitude_e6, true, lat, sizeof(lat));
@@ -530,7 +551,10 @@ static bool send_beacon(int fd, const fmo_config_t *config)
              config->aprs_comment[0] ? " " : "", config->aprs_comment);
     snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:!%s/%sI%s", call, lat, lon,
              comment);
-    if (!send_line(fd, line)) return false;
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    bool sent = send_line(fd, line);
+    xSemaphoreGive(s_tx_lock);
+    if (!sent) return false;
     /* Mirror the beacon onto the enabled AFSK channels (header gets
      * sanitized of the IS-only TCPIP entry). */
     if (config->aprs_rf_tx || config->aprs_nrl_tx) {
@@ -539,7 +563,9 @@ static bool send_beacon(int fd, const fmo_config_t *config)
     /* Status line: firmware/board identity (matches reference NRL-ESP32 format) */
     snprintf(line, sizeof(line), "%s>NRLBOX,TCPIP*:>NRL-ESP32,%s,v%s,0.00v",
              call, FMO_BOARD_TYPE, FMO_FIRMWARE_VERSION);
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
     send_line(fd, line);
+    xSemaphoreGive(s_tx_lock);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     ++s_tx_count;
     xSemaphoreGive(s_lock);
@@ -552,7 +578,22 @@ static bool send_beacon(int fd, const fmo_config_t *config)
 static void handle_line(const char *line, bool from_afsk, uint8_t afsk_source,
                         int is_fd)
 {
-    if (line == NULL || line[0] == '\0' || line[0] == '#') return;
+    if (line == NULL || line[0] == '\0') return;
+    if (line[0] == '#') {
+        /* APRS-IS server comments.  "# logresp <call> verified, ..." confirms
+         * the passcode; only then may we transmit (NRL beacon and the FMO-V4
+         * STATION broadcast).  "unverified" contains "verified", so it must
+         * be checked first (same order as the reference parser). */
+        if (!from_afsk && strncmp(line, "# logresp ", 10) == 0) {
+            const bool verified = strstr(line, "unverified") == NULL &&
+                                  strstr(line, "verified") != NULL;
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_verified = verified;
+            xSemaphoreGive(s_lock);
+            ESP_LOGI(TAG, "APRS-IS %s", line + 2);
+        }
+        return;
+    }
     const char *gt = strchr(line, '>');
     const char *colon = strchr(line, ':');
     if (gt == NULL || colon == NULL || gt >= colon) return;
@@ -632,6 +673,45 @@ static void handle_line(const char *line, bool from_afsk, uint8_t afsk_source,
                  ? (afsk_source == APRS_AFSK_SOURCE_NRL ? "NRL " : "RF ") : "",
              source, summary);
 
+    /* FMO QSO signaling: APFMO0 destination with an APRS message body
+     * ":ADDRESSEE<pad9>:payload{msgId".  Consumed by the QSO engine locally
+     * and never relayed to the AFSK channels. */
+    if (text[0] == ':') {
+        const char *dest_end = gt + 1;
+        while (dest_end < colon && *dest_end != ',') ++dest_end;
+        if ((size_t)(dest_end - (gt + 1)) == 6 &&
+            memcmp(gt + 1, "APFMO0", 6) == 0) {
+            const char *addr = text + 1;
+            const char *addr_end = strchr(addr, ':');
+            if (addr_end != NULL && addr_end - addr <= 9) {
+                char to[16];
+                size_t to_len = (size_t)(addr_end - addr);
+                memcpy(to, addr, to_len);
+                to[to_len] = '\0';
+                while (to_len > 0 && to[to_len - 1] == ' ') {
+                    to[--to_len] = '\0';
+                }
+                const char *payload = addr_end + 1;
+                const char *brace = strchr(payload, '{');
+                char msgid[12] = "";
+                char payload_buf[224];
+                if (brace != NULL) {
+                    strlcpy(msgid, brace + 1, sizeof(msgid));
+                    size_t plen = (size_t)(brace - payload);
+                    if (plen >= sizeof(payload_buf)) {
+                        plen = sizeof(payload_buf) - 1;
+                    }
+                    memcpy(payload_buf, payload, plen);
+                    payload_buf[plen] = '\0';
+                } else {
+                    strlcpy(payload_buf, payload, sizeof(payload_buf));
+                }
+                fmo_qso_handle_aprs_message(source, to, payload_buf, msgid);
+            }
+            return;
+        }
+    }
+
     /* Gateway forwarding (mirrors the NRL-ESP32 reference). Own traffic
      * and already-gated packets (q constructs) are never re-gated to IS;
      * RF<->NRL hops append our callsign so returning copies are dropped. */
@@ -697,6 +777,11 @@ static void aprs_task(void *argument)
             close(fd);
             fd = -1;
             rx_used = 0;
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_fd = -1;
+            s_connected = false;
+            s_verified = false;
+            xSemaphoreGive(s_lock);
         }
         active_generation = generation;
         const bool should_run = config.aprs_enabled && network.station_connected;
@@ -704,6 +789,11 @@ static void aprs_task(void *argument)
             close(fd);
             fd = -1;
             rx_used = 0;
+            xSemaphoreTake(s_lock, portMAX_DELAY);
+            s_fd = -1;
+            s_connected = false;
+            s_verified = false;
+            xSemaphoreGive(s_lock);
         }
 
         uint32_t now = now_ms();
@@ -715,6 +805,8 @@ static void aprs_task(void *argument)
                 last_beacon = 0;
                 xSemaphoreTake(s_lock, portMAX_DELAY);
                 s_connected = true;
+                s_verified = false;  /* until "# logresp ... verified" */
+                s_fd = fd;
                 xSemaphoreGive(s_lock);
             }
         }
@@ -735,6 +827,8 @@ static void aprs_task(void *argument)
                     rx_used = 0;
                     xSemaphoreTake(s_lock, portMAX_DELAY);
                     s_connected = false;
+                    s_verified = false;
+                    s_fd = -1;
                     xSemaphoreGive(s_lock);
                     break;
                 }
@@ -766,6 +860,8 @@ static void aprs_task(void *argument)
         if (fd < 0) {
             xSemaphoreTake(s_lock, portMAX_DELAY);
             s_connected = false;
+            s_verified = false;
+            s_fd = -1;
             xSemaphoreGive(s_lock);
         }
         vTaskDelay(pdMS_TO_TICKS(APRS_LOOP_MS));
@@ -796,6 +892,12 @@ esp_err_t aprs_service_start(const fmo_config_t *config)
     }
     s_lock = xSemaphoreCreateMutex();
     if (s_lock == NULL) return ESP_ERR_NO_MEM;
+    s_tx_lock = xSemaphoreCreateMutex();
+    if (s_tx_lock == NULL) {
+        vSemaphoreDelete(s_lock);
+        s_lock = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     s_config = *config;
     s_generation = 1;
     if (xTaskCreateStatic(aprs_task, "aprs",
@@ -867,4 +969,96 @@ bool aprs_service_send_beacon_now(void)
     if (allowed) s_send_now = true;
     xSemaphoreGive(s_lock);
     return allowed;
+}
+
+bool aprs_service_is_verified(void)
+{
+    if (s_lock == NULL) return false;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const bool verified = s_connected && s_verified;
+    xSemaphoreGive(s_lock);
+    return verified;
+}
+
+void aprs_service_format_coord(int32_t value_e6, bool latitude, char *out,
+                               size_t size)
+{
+    format_coord(value_e6, latitude, out, size);
+}
+
+/* FMO APRS source callsign: the FMO identity (fmo_callsign) with its own
+ * SSID, not the NRL callsign used by own_callsign(). */
+static void fmo_source_callsign(const fmo_config_t *config, char *out,
+                                size_t size)
+{
+    char base[8] = {0};
+    size_t used = 0;
+    for (const char *p = config->fmo_callsign; *p && used < 6; ++p) {
+        if (*p == '-') break;
+        if (isalnum((unsigned char)*p)) base[used++] = (char)toupper((unsigned char)*p);
+    }
+    if (used == 0) strlcpy(base, "NOCALL", sizeof(base));
+    if (config->fmo_callsign_ssid > 0 && config->fmo_callsign_ssid <= 15) {
+        snprintf(out, size, "%s-%u", base, (unsigned)config->fmo_callsign_ssid);
+    } else {
+        strlcpy(out, base, size);
+    }
+}
+
+/* Shared tail of the FMO-V4 senders: gate on a live, verified APRS-IS
+ * connection and put one fully built TNC2 line on the wire. */
+static bool send_fmo_v4_line(const char *line)
+{
+    fmo_config_t config;
+    int fd;
+    bool verified;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    config = s_config;
+    fd = s_fd;
+    verified = s_connected && s_verified;
+    xSemaphoreGive(s_lock);
+    if (fd < 0 || !verified || !config.aprs_enabled ||
+        !config.aprs_position_set) return false;
+    xSemaphoreTake(s_tx_lock, portMAX_DELAY);
+    const bool sent = send_line(fd, line);
+    xSemaphoreGive(s_tx_lock);
+    return sent;
+}
+
+bool aprs_service_send_fmo_v4_frame(const char *tocall, const char *body)
+{
+    if (tocall == NULL || body == NULL || s_lock == NULL ||
+        s_tx_lock == NULL) return false;
+    fmo_config_t config;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    config = s_config;
+    xSemaphoreGive(s_lock);
+    char call[16];
+    fmo_source_callsign(&config, call, sizeof(call));
+    char line[1024];
+    int written = snprintf(line, sizeof(line), "%s>%s,TCPIP*:%s",
+                           call, tocall, body);
+    if (written <= 0 || (size_t)written >= sizeof(line)) return false;
+    return send_fmo_v4_line(line);
+}
+
+bool aprs_service_send_fmo_v4_packet(const char *comment)
+{
+    if (comment == NULL || s_lock == NULL || s_tx_lock == NULL) return false;
+    fmo_config_t config;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    config = s_config;
+    xSemaphoreGive(s_lock);
+    char call[16], lat[12], lon[13];
+    fmo_source_callsign(&config, call, sizeof(call));
+    format_coord(config.aprs_latitude_e6, true, lat, sizeof(lat));
+    format_coord(config.aprs_longitude_e6, false, lon, sizeof(lon));
+    /* "=<lat>F<lon>Ei" is the position prefix of FMO-V4 broadcasts
+     * (APFMO4 destination, TCPIP* path); the lat/lon strings must stay
+     * byte-identical to the signed TBS, so both come from format_coord(). */
+    char line[1024];
+    int written = snprintf(line, sizeof(line), "%s>APFMO4,TCPIP*:=%sF%sEi%s",
+                           call, lat, lon, comment);
+    if (written <= 0 || (size_t)written >= sizeof(line)) return false;
+    return send_fmo_v4_line(line);
 }
